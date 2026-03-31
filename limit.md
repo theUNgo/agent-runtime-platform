@@ -77,7 +77,7 @@
 - workflow skill 应将 `workflowBranchState / workflowGroupState` 写回 `state`
 - workflow skill 允许通过 `summaryFromBranch / summaryFromGroup` 声明显式汇总节点
 - 显式汇总节点的结果也应继续写回统一 `state`
-- workflow skill 的 `when` 当前至少应支持组合条件表达式（`== / != / && / || / ()`），便于基于汇总结果做分组分流
+- workflow skill 的 `when` 当前至少应支持组合条件表达式（`== / != / > / >= / < / <= / in / ! / && / || / ()`），便于基于汇总结果做分组分流
 
 ## 管理员总览规范
 
