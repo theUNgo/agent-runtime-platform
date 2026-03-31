@@ -445,6 +445,139 @@ class WorkflowSkillBindingTest {
         assertTrue(result.output().path("steps").get(2).path("when").asText().contains("||"));
     }
 
+    @Test
+    void shouldSupportNegationAndNumericComparisonInWhenExpression() {
+        SkillManifest manifest = new SkillManifest(
+                "binding-skill-negation-numeric",
+                "Binding Skill Negation Numeric",
+                "0.1.0",
+                "Workflow with negation and numeric comparison",
+                "workflow",
+                "workflows/demo.yaml",
+                null,
+                null,
+                List.of("workflow", "condition"),
+                List.of(
+                        new SkillWorkflowStep(
+                                "high-score-route",
+                                "高分路径",
+                                "当评分高于等于 80 且不是关闭状态时进入高分路径",
+                                "highScoreRoute",
+                                "!(input.inputMeta.closed == true) && input.score >= 80",
+                                null,
+                                null,
+                                "judge",
+                                "high-score",
+                                null,
+                                null,
+                                false
+                        ),
+                        new SkillWorkflowStep(
+                                "fallback-route",
+                                "兜底路径",
+                                "未命中高分路径时进入兜底路径",
+                                "fallbackRoute",
+                                "input.score < 80 || input.inputMeta.closed == true",
+                                null,
+                                null,
+                                "judge",
+                                "fallback",
+                                null,
+                                null,
+                                false
+                        )
+                )
+        );
+
+        ExecutableWorkflowSkill skill = new ExecutableWorkflowSkill(
+                manifest,
+                objectMapper,
+                messageService,
+                workflowExecutionSupport()
+        );
+
+        var result = skill.execute(
+                new CapabilityContext("conversation-1", "测试取反和数值比较", ".", null),
+                objectMapper.createObjectNode()
+                        .put("score", 92)
+                        .set("inputMeta", objectMapper.createObjectNode().put("closed", false))
+        );
+
+        assertTrue(result.success());
+        assertEquals("SUCCESS", result.output().path("steps").get(0).path("status").asText());
+        assertEquals("SKIPPED", result.output().path("steps").get(1).path("status").asText());
+        assertEquals("SUCCESS", result.output().path("workflowGroupState").path("high-score").path("status").asText());
+        assertEquals("SKIPPED", result.output().path("workflowGroupState").path("fallback").path("status").asText());
+        assertTrue(result.output().path("steps").get(0).path("when").asText().contains(">="));
+        assertTrue(result.output().path("steps").get(0).path("when").asText().contains("!"));
+    }
+
+    @Test
+    void shouldSupportCollectionMembershipInWhenExpression() {
+        SkillManifest manifest = new SkillManifest(
+                "binding-skill-collection-in",
+                "Binding Skill Collection In",
+                "0.1.0",
+                "Workflow with collection membership",
+                "workflow",
+                "workflows/demo.yaml",
+                null,
+                null,
+                List.of("workflow", "condition", "collection"),
+                List.of(
+                        new SkillWorkflowStep(
+                                "allowed-status-route",
+                                "允许状态路径",
+                                "状态在允许集合内时进入 allow-path",
+                                "allowedStatusRoute",
+                                "input.status in [SUCCESS, DEGRADED, '{{input.allowedOverride}}']",
+                                null,
+                                null,
+                                "judge",
+                                "allow-path",
+                                null,
+                                null,
+                                false
+                        ),
+                        new SkillWorkflowStep(
+                                "blocked-status-route",
+                                "阻断状态路径",
+                                "不在允许集合时进入 blocked-path",
+                                "blockedStatusRoute",
+                                "!(input.status in [SUCCESS, DEGRADED, '{{input.allowedOverride}}'])",
+                                null,
+                                null,
+                                "judge",
+                                "blocked-path",
+                                null,
+                                null,
+                                false
+                        )
+                )
+        );
+
+        ExecutableWorkflowSkill skill = new ExecutableWorkflowSkill(
+                manifest,
+                objectMapper,
+                messageService,
+                workflowExecutionSupport()
+        );
+
+        var result = skill.execute(
+                new CapabilityContext("conversation-1", "测试集合判断", ".", null),
+                objectMapper.createObjectNode()
+                        .put("status", "DEGRADED")
+                        .put("allowedOverride", "PENDING")
+        );
+
+        assertTrue(result.success());
+        assertEquals("SUCCESS", result.output().path("steps").get(0).path("status").asText());
+        assertEquals("SKIPPED", result.output().path("steps").get(1).path("status").asText());
+        assertEquals("SUCCESS", result.output().path("workflowGroupState").path("allow-path").path("status").asText());
+        assertEquals("SKIPPED", result.output().path("workflowGroupState").path("blocked-path").path("status").asText());
+        assertTrue(result.output().path("steps").get(0).path("when").asText().contains(" in "));
+    }
+
     private WorkflowSkillExecutionSupport workflowExecutionSupport() {
         AgentCapability echoCapability = new BuiltinEchoCapability(objectMapper, messageService);
         CapabilityRegistry registry = new CapabilityRegistry() {
