@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -247,6 +248,9 @@ public class WorkflowSkillExecutionSupport {
      * 解析 workflow 条件表达式。
      * 当前支持：
      * - `==` / `!=`
+     * - `>` / `>=` / `<` / `<=`
+     * - `in`
+     * - `!`
      * - `&&` / `||`
      * - `(` / `)` 优先级
      * 如果表达式本身不属于条件语法，则返回 null，交给旧的真值规则兜底。
@@ -278,6 +282,12 @@ public class WorkflowSkillExecutionSupport {
                 || expression.contains("||")
                 || expression.contains("==")
                 || expression.contains("!=")
+                || expression.contains(">=")
+                || expression.contains("<=")
+                || expression.contains(">")
+                || expression.contains("<")
+                || expression.contains("!")
+                || expression.contains(" in ")
                 || expression.contains("(")
                 || expression.contains(")");
     }
@@ -299,6 +309,15 @@ public class WorkflowSkillExecutionSupport {
                 tokens.add(new ConditionToken(ConditionTokenType.LEFT_PAREN, "("));
                 index++;
                 continue;
+            }
+            if (current == '!') {
+                if (index + 1 < expression.length() && expression.charAt(index + 1) == '=') {
+                    // `!=` 会在双字符操作符分支里处理，这里不重复消费。
+                } else {
+                    tokens.add(new ConditionToken(ConditionTokenType.NOT, "!"));
+                    index++;
+                    continue;
+                }
             }
             if (current == ')') {
                 tokens.add(new ConditionToken(ConditionTokenType.RIGHT_PAREN, ")"));
@@ -327,6 +346,31 @@ public class WorkflowSkillExecutionSupport {
                     index += 2;
                     continue;
                 }
+                if (">=".equals(pair)) {
+                    tokens.add(new ConditionToken(ConditionTokenType.GREATER_THAN_OR_EQUALS, pair));
+                    index += 2;
+                    continue;
+                }
+                if ("<=".equals(pair)) {
+                    tokens.add(new ConditionToken(ConditionTokenType.LESS_THAN_OR_EQUALS, pair));
+                    index += 2;
+                    continue;
+                }
+            }
+            if (current == '>') {
+                tokens.add(new ConditionToken(ConditionTokenType.GREATER_THAN, ">"));
+                index++;
+                continue;
+            }
+            if (current == '<') {
+                tokens.add(new ConditionToken(ConditionTokenType.LESS_THAN, "<"));
+                index++;
+                continue;
+            }
+            if (startsWithKeyword(expression, index, "in")) {
+                tokens.add(new ConditionToken(ConditionTokenType.IN, "in"));
+                index += 2;
+                continue;
             }
             int nextIndex = readConditionValue(expression, index);
             if (nextIndex <= index) {
@@ -347,6 +391,9 @@ public class WorkflowSkillExecutionSupport {
         if (current == '"' || current == '\'') {
             return readQuotedValue(expression, startIndex, current);
         }
+        if (current == '[') {
+            return readBracketValue(expression, startIndex);
+        }
         if (current == '{' && startIndex + 1 < expression.length() && expression.charAt(startIndex + 1) == '{') {
             return readTemplateValue(expression, startIndex);
         }
@@ -358,9 +405,20 @@ public class WorkflowSkillExecutionSupport {
             }
             if (index + 1 < expression.length()) {
                 String pair = expression.substring(index, index + 2);
-                if ("&&".equals(pair) || "||".equals(pair) || "==".equals(pair) || "!=".equals(pair)) {
+                if ("&&".equals(pair)
+                        || "||".equals(pair)
+                        || "==".equals(pair)
+                        || "!=".equals(pair)
+                        || ">=".equals(pair)
+                        || "<=".equals(pair)) {
                     break;
                 }
+            }
+            if (valueChar == '!' || valueChar == '>' || valueChar == '<') {
+                break;
+            }
+            if (startsWithKeyword(expression, index, "in")) {
+                break;
             }
             index++;
         }
@@ -391,6 +449,53 @@ public class WorkflowSkillExecutionSupport {
     }
 
     /**
+     * 读取集合字面量。
+     * 这样 `in` 右侧就可以写成 `[SUCCESS, DEGRADED]` 或 `['a', '{{state.x}}']`。
+     */
+    private int readBracketValue(String expression, int startIndex) {
+        int depth = 1;
+        int index = startIndex + 1;
+        while (index < expression.length()) {
+            char current = expression.charAt(index);
+            if (current == '"' || current == '\'') {
+                index = readQuotedValue(expression, index, current);
+                continue;
+            }
+            if (current == '{' && index + 1 < expression.length() && expression.charAt(index + 1) == '{') {
+                index = readTemplateValue(expression, index);
+                continue;
+            }
+            if (current == '[') {
+                depth++;
+            } else if (current == ']') {
+                depth--;
+                if (depth == 0) {
+                    return index + 1;
+                }
+            }
+            index++;
+        }
+        throw new IllegalArgumentException("Unclosed collection condition value");
+    }
+
+    private boolean startsWithKeyword(String expression, int index, String keyword) {
+        if (index < 0 || keyword == null || keyword.isBlank()) {
+            return false;
+        }
+        if (!expression.regionMatches(index, keyword, 0, keyword.length())) {
+            return false;
+        }
+        int endIndex = index + keyword.length();
+        boolean leftBoundary = index == 0 || !isIdentifierPart(expression.charAt(index - 1));
+        boolean rightBoundary = endIndex >= expression.length() || !isIdentifierPart(expression.charAt(endIndex));
+        return leftBoundary && rightBoundary;
+    }
+
+    private boolean isIdentifierPart(char value) {
+        return Character.isLetterOrDigit(value) || value == '_' || value == '.';
+    }
+
+    /**
      * 解析条件表达式的单侧操作数。
      * 支持三类写法：
      * 1. `state.xxx` / `input.xxx` 路径
@@ -402,13 +507,13 @@ public class WorkflowSkillExecutionSupport {
                                            JsonNode input,
                                            ObjectNode workflowState) {
         String operand = rawOperand == null ? "" : rawOperand.trim();
+        if ((operand.startsWith("\"") && operand.endsWith("\""))
+                || (operand.startsWith("'") && operand.endsWith("'"))) {
+            operand = operand.substring(1, operand.length() - 1).trim();
+        }
         if (operand.startsWith("{{") && operand.endsWith("}}")) {
             String inner = operand.substring(2, operand.length() - 2).trim();
             return resolveExpression(inner, context, input, workflowState);
-        }
-        if ((operand.startsWith("\"") && operand.endsWith("\""))
-                || (operand.startsWith("'") && operand.endsWith("'"))) {
-            return operand.substring(1, operand.length() - 1);
         }
         if ("userMessage".equals(operand)
                 || "workspaceRoot".equals(operand)
@@ -438,16 +543,123 @@ public class WorkflowSkillExecutionSupport {
                 || "off".equals(normalized));
     }
 
+    /**
+     * 判断左值是否属于右侧集合。
+     * 集合语法使用 `[a, b, c]`，内部元素继续复用现有操作数解析逻辑。
+     */
+    private boolean matchesInCollection(String leftOperand,
+                                        String rightOperand,
+                                        CapabilityContext context,
+                                        JsonNode input,
+                                        ObjectNode workflowState) {
+        String normalizedCollection = rightOperand == null ? "" : rightOperand.trim();
+        if (!normalizedCollection.startsWith("[") || !normalizedCollection.endsWith("]")) {
+            return false;
+        }
+        String content = normalizedCollection.substring(1, normalizedCollection.length() - 1).trim();
+        if (content.isEmpty()) {
+            return false;
+        }
+        for (String item : splitCollectionItems(content)) {
+            if (leftOperand.equals(resolveConditionOperand(item, context, input, workflowState))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 轻量拆分集合元素。
+     * 需要保护引号、模板和嵌套集合，避免值内部的逗号被误拆。
+     */
+    private String[] splitCollectionItems(String content) {
+        java.util.List<String> items = new java.util.ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int bracketDepth = 0;
+        boolean inSingleQuote = false;
+        boolean inDoubleQuote = false;
+        int index = 0;
+        while (index < content.length()) {
+            char value = content.charAt(index);
+            if (!inDoubleQuote && value == '\'' && (index == 0 || content.charAt(index - 1) != '\\')) {
+                inSingleQuote = !inSingleQuote;
+                current.append(value);
+                index++;
+                continue;
+            }
+            if (!inSingleQuote && value == '"' && (index == 0 || content.charAt(index - 1) != '\\')) {
+                inDoubleQuote = !inDoubleQuote;
+                current.append(value);
+                index++;
+                continue;
+            }
+            if (!inSingleQuote && !inDoubleQuote) {
+                if (value == '[') {
+                    bracketDepth++;
+                } else if (value == ']') {
+                    bracketDepth--;
+                } else if (value == ',' && bracketDepth == 0) {
+                    items.add(current.toString().trim());
+                    current.setLength(0);
+                    index++;
+                    continue;
+                }
+            }
+            current.append(value);
+            index++;
+        }
+        if (!current.isEmpty()) {
+            items.add(current.toString().trim());
+        }
+        return items.stream()
+                .filter(item -> !item.isBlank())
+                .toArray(String[]::new);
+    }
+
+    /**
+     * 解析大小比较。
+     * 当前优先走数值比较；如果两侧都不是数值，则回退为忽略大小写的字符串比较。
+     */
+    private int compareOperands(String leftOperand, String rightOperand) {
+        BigDecimal leftNumber = parseNumber(leftOperand);
+        BigDecimal rightNumber = parseNumber(rightOperand);
+        if (leftNumber != null && rightNumber != null) {
+            return leftNumber.compareTo(rightNumber);
+        }
+        return leftOperand.compareToIgnoreCase(rightOperand);
+    }
+
+    private BigDecimal parseNumber(String rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+        String normalized = rawValue.trim();
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        try {
+            return new BigDecimal(normalized);
+        } catch (NumberFormatException exception) {
+            return null;
+        }
+    }
+
     private record ConditionToken(ConditionTokenType type, String value) {
     }
 
     private enum ConditionTokenType {
         LEFT_PAREN,
         RIGHT_PAREN,
+        NOT,
         AND,
         OR,
         EQUALS,
         NOT_EQUALS,
+        GREATER_THAN,
+        GREATER_THAN_OR_EQUALS,
+        LESS_THAN,
+        LESS_THAN_OR_EQUALS,
+        IN,
         VALUE
     }
 
@@ -491,12 +703,19 @@ public class WorkflowSkillExecutionSupport {
         }
 
         private boolean parseAnd() {
-            boolean result = parsePrimary();
+            boolean result = parseUnary();
             while (match(ConditionTokenType.AND)) {
-                boolean right = parsePrimary();
+                boolean right = parseUnary();
                 result = result && right;
             }
             return result;
+        }
+
+        private boolean parseUnary() {
+            if (match(ConditionTokenType.NOT)) {
+                return !parseUnary();
+            }
+            return parsePrimary();
         }
 
         private boolean parsePrimary() {
@@ -518,11 +737,41 @@ public class WorkflowSkillExecutionSupport {
                 ConditionToken rightToken = consume(ConditionTokenType.VALUE);
                 return !resolveOperand(leftToken.value()).equals(resolveOperand(rightToken.value()));
             }
+            if (match(ConditionTokenType.GREATER_THAN)) {
+                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
+                return compare(resolveOperand(leftToken.value()), resolveOperand(rightToken.value())) > 0;
+            }
+            if (match(ConditionTokenType.GREATER_THAN_OR_EQUALS)) {
+                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
+                return compare(resolveOperand(leftToken.value()), resolveOperand(rightToken.value())) >= 0;
+            }
+            if (match(ConditionTokenType.LESS_THAN)) {
+                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
+                return compare(resolveOperand(leftToken.value()), resolveOperand(rightToken.value())) < 0;
+            }
+            if (match(ConditionTokenType.LESS_THAN_OR_EQUALS)) {
+                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
+                return compare(resolveOperand(leftToken.value()), resolveOperand(rightToken.value())) <= 0;
+            }
+            if (match(ConditionTokenType.IN)) {
+                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
+                return matchesInCollection(
+                        resolveOperand(leftToken.value()),
+                        rightToken.value(),
+                        context,
+                        input,
+                        workflowState
+                );
+            }
             return toBooleanValue(resolveOperand(leftToken.value()));
         }
 
         private String resolveOperand(String operand) {
             return resolveConditionOperand(operand, context, input, workflowState);
+        }
+
+        private int compare(String left, String right) {
+            return compareOperands(left, right);
         }
 
         private boolean match(ConditionTokenType type) {
