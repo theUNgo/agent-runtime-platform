@@ -100,7 +100,8 @@
 - 长 Skill 结果压缩
 - workflow skill：
   - `when`
-  - `when` 支持组合条件表达式（`== / != / > / >= / < / <= / in / ! / && / || / ()`）
+  - `when` 支持组合条件表达式（`== / != / === / !== / > / >= / < / <= / in / not in / ! / && / || / ()`）
+  - `when` 支持轻量函数式条件（如 `exists()`、`empty()`、`contains()`、`startsWith()`、`endsWith()`、`matches()`、`length()`、`number()`、`boolean()`、`string()`、`typeOf()`）
   - `capabilityId`
   - `capabilityInput`
   - `continueOnFailure`

@@ -305,6 +305,11 @@ public class WorkflowSkillExecutionSupport {
                 index++;
                 continue;
             }
+            if (current == ',') {
+                tokens.add(new ConditionToken(ConditionTokenType.COMMA, ","));
+                index++;
+                continue;
+            }
             if (current == '(') {
                 tokens.add(new ConditionToken(ConditionTokenType.LEFT_PAREN, "("));
                 index++;
@@ -323,6 +328,19 @@ public class WorkflowSkillExecutionSupport {
                 tokens.add(new ConditionToken(ConditionTokenType.RIGHT_PAREN, ")"));
                 index++;
                 continue;
+            }
+            if (index + 2 < expression.length()) {
+                String triple = expression.substring(index, index + 3);
+                if ("===".equals(triple)) {
+                    tokens.add(new ConditionToken(ConditionTokenType.STRICT_EQUALS, triple));
+                    index += 3;
+                    continue;
+                }
+                if ("!==".equals(triple)) {
+                    tokens.add(new ConditionToken(ConditionTokenType.STRICT_NOT_EQUALS, triple));
+                    index += 3;
+                    continue;
+                }
             }
             if (index + 1 < expression.length()) {
                 String pair = expression.substring(index, index + 2);
@@ -366,6 +384,17 @@ public class WorkflowSkillExecutionSupport {
                 tokens.add(new ConditionToken(ConditionTokenType.LESS_THAN, "<"));
                 index++;
                 continue;
+            }
+            if (startsWithKeyword(expression, index, "not")) {
+                int cursor = index + 3;
+                while (cursor < expression.length() && Character.isWhitespace(expression.charAt(cursor))) {
+                    cursor++;
+                }
+                if (startsWithKeyword(expression, cursor, "in")) {
+                    tokens.add(new ConditionToken(ConditionTokenType.NOT_IN, "not in"));
+                    index = cursor + 2;
+                    continue;
+                }
             }
             if (startsWithKeyword(expression, index, "in")) {
                 tokens.add(new ConditionToken(ConditionTokenType.IN, "in"));
@@ -414,8 +443,23 @@ public class WorkflowSkillExecutionSupport {
                     break;
                 }
             }
-            if (valueChar == '!' || valueChar == '>' || valueChar == '<') {
+            if (index + 2 < expression.length()) {
+                String triple = expression.substring(index, index + 3);
+                if ("===".equals(triple) || "!==".equals(triple)) {
+                    break;
+                }
+            }
+            if (valueChar == '!' || valueChar == '>' || valueChar == '<' || valueChar == ',') {
                 break;
+            }
+            if (startsWithKeyword(expression, index, "not")) {
+                int cursor = index + 3;
+                while (cursor < expression.length() && Character.isWhitespace(expression.charAt(cursor))) {
+                    cursor++;
+                }
+                if (startsWithKeyword(expression, cursor, "in")) {
+                    break;
+                }
             }
             if (startsWithKeyword(expression, index, "in")) {
                 break;
@@ -496,24 +540,32 @@ public class WorkflowSkillExecutionSupport {
     }
 
     /**
-     * 解析条件表达式的单侧操作数。
-     * 支持三类写法：
+     * 解析条件表达式的单侧操作数，并尽量保留类型信息。
+     * 当前支持：
      * 1. `state.xxx` / `input.xxx` 路径
      * 2. `{{state.xxx}}` 这类模板占位
-     * 3. 直接字面量，允许包裹单引号或双引号
+     * 3. 直接字面量：字符串 / 布尔 / 数字 / null
      */
-    private String resolveConditionOperand(String rawOperand,
-                                           CapabilityContext context,
-                                           JsonNode input,
-                                           ObjectNode workflowState) {
+    private Object resolveConditionValue(String rawOperand,
+                                         CapabilityContext context,
+                                         JsonNode input,
+                                         ObjectNode workflowState) {
         String operand = rawOperand == null ? "" : rawOperand.trim();
+        if (operand.isEmpty()) {
+            return "";
+        }
         if ((operand.startsWith("\"") && operand.endsWith("\""))
                 || (operand.startsWith("'") && operand.endsWith("'"))) {
-            operand = operand.substring(1, operand.length() - 1).trim();
+            String inner = operand.substring(1, operand.length() - 1).trim();
+            if (inner.startsWith("{{") && inner.endsWith("}}")) {
+                String expression = inner.substring(2, inner.length() - 2).trim();
+                return resolveExpressionValue(expression, context, input, workflowState);
+            }
+            return inner;
         }
         if (operand.startsWith("{{") && operand.endsWith("}}")) {
             String inner = operand.substring(2, operand.length() - 2).trim();
-            return resolveExpression(inner, context, input, workflowState);
+            return resolveExpressionValue(inner, context, input, workflowState);
         }
         if ("userMessage".equals(operand)
                 || "workspaceRoot".equals(operand)
@@ -521,20 +573,107 @@ public class WorkflowSkillExecutionSupport {
                 || "state".equals(operand)
                 || operand.startsWith("input.")
                 || operand.startsWith("state.")) {
-            return resolveExpression(operand, context, input, workflowState);
+            return resolveExpressionValue(operand, context, input, workflowState);
+        }
+        Object literalValue = parseLiteralValue(operand);
+        return literalValue == null && !"null".equalsIgnoreCase(operand) ? operand : literalValue;
+    }
+
+    private Object resolveExpressionValue(String expression,
+                                          CapabilityContext context,
+                                          JsonNode input,
+                                          ObjectNode workflowState) {
+        String normalized = expression == null ? "" : expression.trim();
+        if (normalized.isEmpty()) {
+            return "";
+        }
+        if ("userMessage".equals(normalized)) {
+            return safe(context.userMessage());
+        }
+        if ("workspaceRoot".equals(normalized)) {
+            return safe(context.workspaceRoot());
+        }
+        if ("input".equals(normalized)) {
+            return input == null ? JsonNodeFactory.instance.nullNode() : input;
+        }
+        if ("state".equals(normalized)) {
+            return workflowState == null ? JsonNodeFactory.instance.nullNode() : workflowState;
+        }
+        if (normalized.startsWith("input.")) {
+            return toTypedConditionValue(resolvePath(input, normalized.substring("input.".length())));
+        }
+        if (normalized.startsWith("state.")) {
+            return toTypedConditionValue(resolvePath(workflowState, normalized.substring("state.".length())));
+        }
+        return resolveExpression(normalized, context, input, workflowState);
+    }
+
+    private Object toTypedConditionValue(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return null;
+        }
+        if (node.isTextual()) {
+            return node.asText();
+        }
+        if (node.isBoolean()) {
+            return node.asBoolean();
+        }
+        if (node.isNumber()) {
+            return node.decimalValue();
+        }
+        return node.deepCopy();
+    }
+
+    private Object parseLiteralValue(String operand) {
+        if (operand == null) {
+            return "";
+        }
+        if ("true".equalsIgnoreCase(operand)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(operand)) {
+            return false;
+        }
+        if ("null".equalsIgnoreCase(operand)) {
+            return null;
+        }
+        BigDecimal numeric = parseNumber(operand);
+        if (numeric != null) {
+            return numeric;
         }
         return operand;
     }
 
     /**
      * 把单个值解释成布尔真值。
-     * 这里与 shouldExecute 的兜底规则保持一致，便于条件子表达式复用。
+     * 这里与 shouldExecute 的兜底规则保持一致，并且额外支持布尔、数值、集合和对象类型。
      */
-    private boolean toBooleanValue(String value) {
+    private boolean toBooleanValue(Object value) {
         if (value == null) {
             return false;
         }
-        String normalized = value.trim().toLowerCase();
+        if (value instanceof Boolean booleanValue) {
+            return booleanValue;
+        }
+        if (value instanceof BigDecimal numericValue) {
+            return numericValue.compareTo(BigDecimal.ZERO) != 0;
+        }
+        if (value instanceof JsonNode node) {
+            if (node.isArray()) {
+                return node.size() > 0;
+            }
+            if (node.isObject()) {
+                return node.size() > 0;
+            }
+            if (node.isBoolean()) {
+                return node.asBoolean();
+            }
+            if (node.isNumber()) {
+                return node.decimalValue().compareTo(BigDecimal.ZERO) != 0;
+            }
+            return toBooleanValue(node.asText());
+        }
+        String normalized = String.valueOf(value).trim().toLowerCase();
         return !(normalized.isEmpty()
                 || "false".equals(normalized)
                 || "0".equals(normalized)
@@ -545,14 +684,22 @@ public class WorkflowSkillExecutionSupport {
 
     /**
      * 判断左值是否属于右侧集合。
-     * 集合语法使用 `[a, b, c]`，内部元素继续复用现有操作数解析逻辑。
+     * 集合语法使用 `[a, b, c]`，支持字面量、模板和路径表达式。
      */
-    private boolean matchesInCollection(String leftOperand,
-                                        String rightOperand,
+    private boolean matchesInCollection(Object leftValue,
+                                        Object rightValue,
                                         CapabilityContext context,
                                         JsonNode input,
                                         ObjectNode workflowState) {
-        String normalizedCollection = rightOperand == null ? "" : rightOperand.trim();
+        if (rightValue instanceof JsonNode node && node.isArray()) {
+            for (JsonNode item : node) {
+                if (strictEquals(leftValue, toTypedConditionValue(item))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        String normalizedCollection = toStringValue(rightValue).trim();
         if (!normalizedCollection.startsWith("[") || !normalizedCollection.endsWith("]")) {
             return false;
         }
@@ -561,7 +708,7 @@ public class WorkflowSkillExecutionSupport {
             return false;
         }
         for (String item : splitCollectionItems(content)) {
-            if (leftOperand.equals(resolveConditionOperand(item, context, input, workflowState))) {
+            if (strictEquals(leftValue, resolveConditionValue(item, context, input, workflowState))) {
                 return true;
             }
         }
@@ -620,20 +767,29 @@ public class WorkflowSkillExecutionSupport {
      * 解析大小比较。
      * 当前优先走数值比较；如果两侧都不是数值，则回退为忽略大小写的字符串比较。
      */
-    private int compareOperands(String leftOperand, String rightOperand) {
+    private int compareOperands(Object leftOperand, Object rightOperand) {
         BigDecimal leftNumber = parseNumber(leftOperand);
         BigDecimal rightNumber = parseNumber(rightOperand);
         if (leftNumber != null && rightNumber != null) {
             return leftNumber.compareTo(rightNumber);
         }
-        return leftOperand.compareToIgnoreCase(rightOperand);
+        return toStringValue(leftOperand).compareToIgnoreCase(toStringValue(rightOperand));
     }
 
-    private BigDecimal parseNumber(String rawValue) {
+    private BigDecimal parseNumber(Object rawValue) {
         if (rawValue == null) {
             return null;
         }
-        String normalized = rawValue.trim();
+        if (rawValue instanceof BigDecimal decimalValue) {
+            return decimalValue;
+        }
+        if (rawValue instanceof Number numberValue) {
+            return new BigDecimal(String.valueOf(numberValue));
+        }
+        if (rawValue instanceof JsonNode node && node.isNumber()) {
+            return node.decimalValue();
+        }
+        String normalized = String.valueOf(rawValue).trim();
         if (normalized.isEmpty()) {
             return null;
         }
@@ -644,22 +800,205 @@ public class WorkflowSkillExecutionSupport {
         }
     }
 
+    private boolean looseEquals(Object leftValue, Object rightValue) {
+        BigDecimal leftNumber = parseNumber(leftValue);
+        BigDecimal rightNumber = parseNumber(rightValue);
+        if (leftNumber != null && rightNumber != null) {
+            return leftNumber.compareTo(rightNumber) == 0;
+        }
+        return toStringValue(leftValue).equalsIgnoreCase(toStringValue(rightValue));
+    }
+
+    private boolean strictEquals(Object leftValue, Object rightValue) {
+        if (leftValue == null || rightValue == null) {
+            return leftValue == rightValue;
+        }
+        if (leftValue instanceof BigDecimal leftNumber && rightValue instanceof BigDecimal rightNumber) {
+            return leftNumber.compareTo(rightNumber) == 0;
+        }
+        if (leftValue instanceof JsonNode leftNode && rightValue instanceof JsonNode rightNode) {
+            return leftNode.equals(rightNode);
+        }
+        if (!leftValue.getClass().equals(rightValue.getClass())) {
+            return false;
+        }
+        return leftValue.equals(rightValue);
+    }
+
+    private String toStringValue(Object value) {
+        if (value == null) {
+            return "";
+        }
+        if (value instanceof JsonNode node) {
+            if (node.isTextual()) {
+                return node.asText();
+            }
+            return node.toString();
+        }
+        return String.valueOf(value);
+    }
+
+    private boolean isFunctionName(String tokenValue) {
+        if (tokenValue == null || tokenValue.isBlank()) {
+            return false;
+        }
+        for (int index = 0; index < tokenValue.length(); index++) {
+            char current = tokenValue.charAt(index);
+            if (!Character.isLetterOrDigit(current) && current != '_' && current != '-') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 执行轻量函数式条件。
+     * 当前优先提供 workflow 编排里最常用的一组函数，避免一开始就引入过重 DSL。
+     */
+    private Object evaluateFunction(String functionName, java.util.List<Object> arguments) {
+        String normalized = functionName == null ? "" : functionName.trim().toLowerCase();
+        return switch (normalized) {
+            case "exists" -> requireArgCount(normalized, arguments, 1) && !isMissing(arguments.getFirst());
+            case "empty" -> requireArgCount(normalized, arguments, 1) && isEmpty(arguments.getFirst());
+            case "contains" -> containsFunction(arguments);
+            case "startswith" -> requireArgCount(normalized, arguments, 2)
+                    && toStringValue(arguments.getFirst()).startsWith(toStringValue(arguments.get(1)));
+            case "endswith" -> requireArgCount(normalized, arguments, 2)
+                    && toStringValue(arguments.getFirst()).endsWith(toStringValue(arguments.get(1)));
+            case "matches" -> requireArgCount(normalized, arguments, 2)
+                    && toStringValue(arguments.getFirst()).matches(toStringValue(arguments.get(1)));
+            case "length" -> lengthFunction(arguments);
+            case "number" -> requireArgCount(normalized, arguments, 1) ? parseNumber(arguments.getFirst()) : null;
+            case "boolean" -> requireArgCount(normalized, arguments, 1) && toBooleanValue(arguments.getFirst());
+            case "string" -> requireArgCount(normalized, arguments, 1) ? toStringValue(arguments.getFirst()) : "";
+            case "typeof" -> requireArgCount(normalized, arguments, 1) ? valueTypeOf(arguments.getFirst()) : "unknown";
+            default -> throw new IllegalArgumentException("Unsupported workflow function");
+        };
+    }
+
+    private boolean requireArgCount(String functionName, java.util.List<Object> arguments, int size) {
+        if (arguments.size() != size) {
+            throw new IllegalArgumentException("Invalid workflow function arguments: " + functionName);
+        }
+        return true;
+    }
+
+    private boolean containsFunction(java.util.List<Object> arguments) {
+        requireArgCount("contains", arguments, 2);
+        Object container = arguments.getFirst();
+        Object target = arguments.get(1);
+        if (container instanceof JsonNode node) {
+            if (node.isArray()) {
+                for (JsonNode item : node) {
+                    if (strictEquals(toTypedConditionValue(item), target)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            return toStringValue(node).contains(toStringValue(target));
+        }
+        String containerText = toStringValue(container);
+        if (containerText.startsWith("[") && containerText.endsWith("]")) {
+            String content = containerText.substring(1, containerText.length() - 1).trim();
+            for (String item : splitCollectionItems(content)) {
+                if (strictEquals(parseLiteralValue(item), target) || item.equals(toStringValue(target))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return containerText.contains(toStringValue(target));
+    }
+
+    private BigDecimal lengthFunction(java.util.List<Object> arguments) {
+        requireArgCount("length", arguments, 1);
+        Object value = arguments.getFirst();
+        if (value == null) {
+            return BigDecimal.ZERO;
+        }
+        if (value instanceof JsonNode node) {
+            if (node.isArray() || node.isObject()) {
+                return BigDecimal.valueOf(node.size());
+            }
+            return BigDecimal.valueOf(node.asText().length());
+        }
+        return BigDecimal.valueOf(toStringValue(value).length());
+    }
+
+    private boolean isMissing(Object value) {
+        if (value == null) {
+            return true;
+        }
+        if (value instanceof JsonNode node) {
+            return node.isNull() || node.isMissingNode()
+                    || (node.isTextual() && node.asText().isBlank())
+                    || (node.isArray() && node.isEmpty())
+                    || (node.isObject() && node.isEmpty());
+        }
+        return value instanceof String stringValue && stringValue.isBlank();
+    }
+
+    private boolean isEmpty(Object value) {
+        if (isMissing(value)) {
+            return true;
+        }
+        if (value instanceof BigDecimal numericValue) {
+            return numericValue.compareTo(BigDecimal.ZERO) == 0;
+        }
+        return false;
+    }
+
+    private String valueTypeOf(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value instanceof Boolean) {
+            return "boolean";
+        }
+        if (value instanceof BigDecimal || value instanceof Number) {
+            return "number";
+        }
+        if (value instanceof JsonNode node) {
+            if (node.isArray()) {
+                return "array";
+            }
+            if (node.isObject()) {
+                return "object";
+            }
+            if (node.isBoolean()) {
+                return "boolean";
+            }
+            if (node.isNumber()) {
+                return "number";
+            }
+            if (node.isNull() || node.isMissingNode()) {
+                return "null";
+            }
+        }
+        return "string";
+    }
+
     private record ConditionToken(ConditionTokenType type, String value) {
     }
 
     private enum ConditionTokenType {
         LEFT_PAREN,
         RIGHT_PAREN,
+        COMMA,
         NOT,
         AND,
         OR,
         EQUALS,
         NOT_EQUALS,
+        STRICT_EQUALS,
+        STRICT_NOT_EQUALS,
         GREATER_THAN,
         GREATER_THAN_OR_EQUALS,
         LESS_THAN,
         LESS_THAN_OR_EQUALS,
         IN,
+        NOT_IN,
         VALUE
     }
 
@@ -724,53 +1063,79 @@ public class WorkflowSkillExecutionSupport {
                 consume(ConditionTokenType.RIGHT_PAREN);
                 return result;
             }
-            return parseAtomicCondition();
+            return parseValueCondition();
         }
 
-        private boolean parseAtomicCondition() {
-            ConditionToken leftToken = consume(ConditionTokenType.VALUE);
+        private boolean parseValueCondition() {
+            Object leftValue = parseValueOperand();
             if (match(ConditionTokenType.EQUALS)) {
-                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
-                return resolveOperand(leftToken.value()).equals(resolveOperand(rightToken.value()));
+                Object rightValue = parseValueOperand();
+                return looseEquals(leftValue, rightValue);
             }
             if (match(ConditionTokenType.NOT_EQUALS)) {
-                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
-                return !resolveOperand(leftToken.value()).equals(resolveOperand(rightToken.value()));
+                Object rightValue = parseValueOperand();
+                return !looseEquals(leftValue, rightValue);
+            }
+            if (match(ConditionTokenType.STRICT_EQUALS)) {
+                Object rightValue = parseValueOperand();
+                return strictEquals(leftValue, rightValue);
+            }
+            if (match(ConditionTokenType.STRICT_NOT_EQUALS)) {
+                Object rightValue = parseValueOperand();
+                return !strictEquals(leftValue, rightValue);
             }
             if (match(ConditionTokenType.GREATER_THAN)) {
-                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
-                return compare(resolveOperand(leftToken.value()), resolveOperand(rightToken.value())) > 0;
+                Object rightValue = parseValueOperand();
+                return compare(leftValue, rightValue) > 0;
             }
             if (match(ConditionTokenType.GREATER_THAN_OR_EQUALS)) {
-                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
-                return compare(resolveOperand(leftToken.value()), resolveOperand(rightToken.value())) >= 0;
+                Object rightValue = parseValueOperand();
+                return compare(leftValue, rightValue) >= 0;
             }
             if (match(ConditionTokenType.LESS_THAN)) {
-                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
-                return compare(resolveOperand(leftToken.value()), resolveOperand(rightToken.value())) < 0;
+                Object rightValue = parseValueOperand();
+                return compare(leftValue, rightValue) < 0;
             }
             if (match(ConditionTokenType.LESS_THAN_OR_EQUALS)) {
-                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
-                return compare(resolveOperand(leftToken.value()), resolveOperand(rightToken.value())) <= 0;
+                Object rightValue = parseValueOperand();
+                return compare(leftValue, rightValue) <= 0;
             }
             if (match(ConditionTokenType.IN)) {
-                ConditionToken rightToken = consume(ConditionTokenType.VALUE);
-                return matchesInCollection(
-                        resolveOperand(leftToken.value()),
-                        rightToken.value(),
-                        context,
-                        input,
-                        workflowState
-                );
+                Object rightValue = parseValueOperand();
+                return matchesInCollection(leftValue, rightValue, context, input, workflowState);
             }
-            return toBooleanValue(resolveOperand(leftToken.value()));
+            if (match(ConditionTokenType.NOT_IN)) {
+                Object rightValue = parseValueOperand();
+                return !matchesInCollection(leftValue, rightValue, context, input, workflowState);
+            }
+            return toBooleanValue(leftValue);
         }
 
-        private String resolveOperand(String operand) {
-            return resolveConditionOperand(operand, context, input, workflowState);
+        private Object parseValueOperand() {
+            if (peek(ConditionTokenType.VALUE)
+                    && peekNext(ConditionTokenType.LEFT_PAREN)
+                    && isFunctionName(tokens.get(index).value())) {
+                return parseFunctionInvocation();
+            }
+            ConditionToken valueToken = consume(ConditionTokenType.VALUE);
+            return resolveConditionValue(valueToken.value(), context, input, workflowState);
         }
 
-        private int compare(String left, String right) {
+        private Object parseFunctionInvocation() {
+            String functionName = consume(ConditionTokenType.VALUE).value();
+            consume(ConditionTokenType.LEFT_PAREN);
+            java.util.List<Object> arguments = new java.util.ArrayList<>();
+            if (!peek(ConditionTokenType.RIGHT_PAREN)) {
+                arguments.add(parseValueOperand());
+                while (match(ConditionTokenType.COMMA)) {
+                    arguments.add(parseValueOperand());
+                }
+            }
+            consume(ConditionTokenType.RIGHT_PAREN);
+            return evaluateFunction(functionName, arguments);
+        }
+
+        private int compare(Object left, Object right) {
             return compareOperands(left, right);
         }
 
@@ -784,6 +1149,10 @@ public class WorkflowSkillExecutionSupport {
 
         private boolean peek(ConditionTokenType type) {
             return index < tokens.size() && tokens.get(index).type() == type;
+        }
+
+        private boolean peekNext(ConditionTokenType type) {
+            return index + 1 < tokens.size() && tokens.get(index + 1).type() == type;
         }
 
         private ConditionToken consume(ConditionTokenType type) {

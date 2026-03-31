@@ -578,6 +578,137 @@ class WorkflowSkillBindingTest {
         assertTrue(result.output().path("steps").get(0).path("when").asText().contains(" in "));
     }
 
+    @Test
+    void shouldSupportNotInAndStrictTypeComparison() {
+        SkillManifest manifest = new SkillManifest(
+                "binding-skill-strict-type",
+                "Binding Skill Strict Type",
+                "0.1.0",
+                "Workflow with not in and strict type comparison",
+                "workflow",
+                "workflows/demo.yaml",
+                null,
+                null,
+                List.of("workflow", "condition", "strict"),
+                List.of(
+                        new SkillWorkflowStep(
+                                "strict-number-route",
+                                "严格数值路径",
+                                "严格类型比较命中时进入 strict-number",
+                                "strictNumberRoute",
+                                "input.score === 92 && input.score !== '92'",
+                                null,
+                                null,
+                                "judge",
+                                "strict-number",
+                                null,
+                                null,
+                                false
+                        ),
+                        new SkillWorkflowStep(
+                                "strict-block-route",
+                                "严格阻断路径",
+                                "状态不在阻断集合时进入 allow-nonblocked",
+                                "strictBlockRoute",
+                                "input.status not in [BLOCKED, CLOSED]",
+                                null,
+                                null,
+                                "judge",
+                                "allow-nonblocked",
+                                null,
+                                null,
+                                false
+                        )
+                )
+        );
+
+        ExecutableWorkflowSkill skill = new ExecutableWorkflowSkill(
+                manifest,
+                objectMapper,
+                messageService,
+                workflowExecutionSupport()
+        );
+
+        var result = skill.execute(
+                new CapabilityContext("conversation-1", "测试严格类型比较和 not in", ".", null),
+                objectMapper.createObjectNode()
+                        .put("score", 92)
+                        .put("status", "DEGRADED")
+        );
+
+        assertTrue(result.success());
+        assertEquals("SUCCESS", result.output().path("workflowGroupState").path("strict-number").path("status").asText());
+        assertEquals("SUCCESS", result.output().path("workflowGroupState").path("allow-nonblocked").path("status").asText());
+        assertTrue(result.output().path("steps").get(0).path("when").asText().contains("==="));
+        assertTrue(result.output().path("steps").get(1).path("when").asText().contains("not in"));
+    }
+
+    @Test
+    void shouldSupportFunctionStyleConditions() {
+        SkillManifest manifest = new SkillManifest(
+                "binding-skill-functions",
+                "Binding Skill Functions",
+                "0.1.0",
+                "Workflow with function style conditions",
+                "workflow",
+                "workflows/demo.yaml",
+                null,
+                null,
+                List.of("workflow", "condition", "function"),
+                List.of(
+                        new SkillWorkflowStep(
+                                "function-route",
+                                "函数条件路径",
+                                "同时命中 exists / contains / startsWith / length / typeOf 后进入 function-path",
+                                "functionRoute",
+                                "exists(input.title) && contains(input.title, 'bug') && startsWith(input.title, 'bug') && length(input.title) > 3 && typeOf(input.score) === 'number'",
+                                null,
+                                null,
+                                "judge",
+                                "function-path",
+                                null,
+                                null,
+                                false
+                        ),
+                        new SkillWorkflowStep(
+                                "empty-route",
+                                "空值判断路径",
+                                "当备注为空时进入 empty-path",
+                                "emptyRoute",
+                                "empty(input.note)",
+                                null,
+                                null,
+                                "judge",
+                                "empty-path",
+                                null,
+                                null,
+                                false
+                        )
+                )
+        );
+
+        ExecutableWorkflowSkill skill = new ExecutableWorkflowSkill(
+                manifest,
+                objectMapper,
+                messageService,
+                workflowExecutionSupport()
+        );
+
+        var result = skill.execute(
+                new CapabilityContext("conversation-1", "测试函数式条件", ".", null),
+                objectMapper.createObjectNode()
+                        .put("title", "bug-report")
+                        .put("score", 5)
+                        .put("note", "")
+        );
+
+        assertTrue(result.success());
+        assertEquals("SUCCESS", result.output().path("workflowGroupState").path("function-path").path("status").asText());
+        assertEquals("SUCCESS", result.output().path("workflowGroupState").path("empty-path").path("status").asText());
+        assertTrue(result.output().path("steps").get(0).path("when").asText().contains("exists("));
+        assertTrue(result.output().path("steps").get(1).path("when").asText().contains("empty("));
+    }
+
     private WorkflowSkillExecutionSupport workflowExecutionSupport() {
         AgentCapability echoCapability = new BuiltinEchoCapability(objectMapper, messageService);
         CapabilityRegistry registry = new CapabilityRegistry() {
