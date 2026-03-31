@@ -1,0 +1,50 @@
+server:
+  port: 8080
+
+spring:
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:h2:file:./target/agent-runtime-db;MODE=MySQL;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+
+agent:
+  skills-dir: ./skills
+  workspace-root: .
+  auth:
+    enabled: true
+    token-validity: 30d
+    bootstrap-username: ${AGENT_BOOTSTRAP_USERNAME:admin}
+    bootstrap-password: ${AGENT_BOOTSTRAP_PASSWORD:}
+    bootstrap-display-name: ${AGENT_BOOTSTRAP_DISPLAY_NAME:Platform Admin}
+  security:
+    crypto:
+      encryption-secret: ${AGENT_ENCRYPTION_SECRET:ChangeThisDevelopmentCryptoSecret-32CharsMin}
+  mcp:
+    servers:
+      - name: demo-stdio
+        description: Built-in demo stdio MCP server from this repository
+        enabled: false
+        transport: stdio
+        command: powershell.exe
+        args:
+          - -ExecutionPolicy
+          - Bypass
+          - -File
+          - ./scripts/run-demo-mcp-stdio-server.ps1
+      - name: remote-gateway
+        description: Example streamable-http MCP server definition
+        enabled: false
+        transport: streamable-http
+        url: http://localhost:8787/mcp
+        timeout: 10s

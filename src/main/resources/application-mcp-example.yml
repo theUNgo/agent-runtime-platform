@@ -1,0 +1,23 @@
+agent:
+  mcp:
+    servers:
+      - name: demo-stdio
+        description: 工程内自带的 demo stdio MCP server，可直接用于首轮真实联调
+        enabled: false
+        transport: stdio
+        command: powershell.exe
+        args:
+          - -ExecutionPolicy
+          - Bypass
+          - -File
+          - ./scripts/run-demo-mcp-stdio-server.ps1
+        timeout: 15s
+
+      - name: remote-gateway
+        description: 远程 streamable-http MCP server 示例，请替换为真实地址和鉴权头
+        enabled: false
+        transport: streamable-http
+        url: https://your-mcp-gateway.example.com/mcp
+        headers:
+          Authorization: Bearer your-token
+        timeout: 15s

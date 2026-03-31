@@ -1,0 +1,12 @@
+id: code-review
+name: Code Review
+version: 0.1.0
+description: Review a code change request and return a structured review prompt.
+type: prompt
+prompt: |
+  You are a code review skill. Focus on correctness, regressions, edge cases, and test gaps.
+riskLevel: LOW
+tags:
+  - review
+  - coding
+  - quality

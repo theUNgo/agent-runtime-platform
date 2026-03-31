@@ -1,0 +1,22 @@
+agent:
+  mcp:
+    servers:
+      - name: filesystem-local
+        description: 第三方 stdio MCP server 示例，适合本地文件系统联调
+        enabled: false
+        transport: stdio
+        command: npx.cmd
+        args:
+          - -y
+          - "@modelcontextprotocol/server-filesystem"
+          - D:/AI project
+        timeout: 20s
+
+      - name: remote-gateway
+        description: 第三方 streamable-http MCP server 示例，请替换为真实地址与鉴权头
+        enabled: false
+        transport: streamable-http
+        url: https://your-mcp-gateway.example.com/mcp
+        headers:
+          Authorization: Bearer ${MCP_ACCESS_TOKEN:replace-me}
+        timeout: 15s

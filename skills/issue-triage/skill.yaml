@@ -1,0 +1,11 @@
+id: issue-triage
+name: Issue Triage Workflow
+version: 0.1.0
+description: Analyze an issue request and output a structured triage workflow summary.
+type: workflow
+entry: workflows/triage-flow.yaml
+riskLevel: LOW
+tags:
+  - triage
+  - workflow
+  - planning

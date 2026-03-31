@@ -1,0 +1,46 @@
+steps:
+  - id: collect-context
+    title: 收集问题上下文
+    instruction: |
+      阅读用户消息 {{userMessage}}，提取核心问题、影响范围和优先级线索。
+    outputKey: context
+    branch: triage
+    group: intake
+  - id: inspect-input
+    title: 检查附加输入
+    instruction: |
+      如果存在输入对象，则重点查看 {{input}}，并记录可直接用于排查的字段。
+    outputKey: inputSummary
+    branch: triage
+    group: intake
+  - id: propose-next-step
+    title: 生成下一步建议
+    instruction: |
+      基于当前工作区 {{workspaceRoot}} 和已知上下文，给出一条最适合继续推进的处理建议。
+    outputKey: nextStep
+    branch: triage
+    group: decision
+  - id: summarize-triage-branch
+    title: 汇总分支执行情况
+    instruction: |
+      汇总 triage 分支当前的执行状态，供后续步骤或前端直接读取。
+    outputKey: triageBranchSummary
+    branch: triage
+    group: decision
+    summaryFromBranch: triage
+  - id: route-success-group
+    title: 成功路径分流
+    instruction: |
+      如果 triage 分支汇总状态为 SUCCESS，则继续进入 success-path 分组。
+    outputKey: successRoute
+    when: state.triageBranchSummary.scope.status == SUCCESS
+    branch: triage
+    group: success-path
+  - id: route-degraded-group
+    title: 降级路径分流
+    instruction: |
+      如果 triage 分支汇总状态为 DEGRADED，则进入 degraded-path 分组继续处理。
+    outputKey: degradedRoute
+    when: state.triageBranchSummary.scope.status == DEGRADED
+    branch: triage
+    group: degraded-path

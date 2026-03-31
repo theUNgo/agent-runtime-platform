@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Runtime Admin</title>
+    <link rel="stylesheet" href="/admin/styles.css">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+</head>
+<body>
+<div id="app" class="shell">
+    <header class="hero">
+        <div class="hero-copy">
+            <p class="eyebrow">Agent Runtime Console</p>
+            <h1>统一管理 MCP Servers 与 Agent Skills</h1>
+            <p class="hero-text">
+                这一版管理台先聚焦“看得见、搜得到、装得上、能排障”。
+                你可以在这里查看当前运行状态、搜索可安装目录项、安装本地 Skill，以及生成 MCP Server 配置模板。
+            </p>
+        </div>
+        <div class="hero-metrics">
+            <article class="metric-card accent-gold">
+                <span class="metric-label">已加载能力</span>
+                <strong class="metric-value">{{ capabilities.length }}</strong>
+            </article>
+            <article class="metric-card accent-blue">
+                <span class="metric-label">MCP Servers</span>
+                <strong class="metric-value">{{ mcpStatuses.length }}</strong>
+            </article>
+            <article class="metric-card accent-red">
+                <span class="metric-label">目录项</span>
+                <strong class="metric-value">{{ catalogItems.length }}</strong>
+            </article>
+        </div>
+    </header>
+
+    <section class="toolbar">
+        <button class="action-button" @click="refreshAll" :disabled="loading.any">
+            {{ loading.any ? '刷新中...' : '刷新全部' }}
+        </button>
+        <span class="toolbar-message" v-if="flashMessage">{{ flashMessage }}</span>
+    </section>
+
+    <main class="dashboard">
+        <section class="panel overview-panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-kicker">Overview</p>
+                    <h2>平台总览</h2>
+                </div>
+            </div>
+            <div class="overview-grid">
+                <article class="overview-card">
+                    <h3>你现在要做的产品</h3>
+                    <p>目标不是单一 MCP Host，而是一个可以搜索、安装、调用、治理 MCP 与 Skills 的统一智能体平台。</p>
+                </article>
+                <article class="overview-card">
+                    <h3>当前已具备</h3>
+                    <p>官方 MCP Java SDK 主路径、技能扫描、统一能力注册、状态验证、多语言错误处理、管理台基础可视化。</p>
+                </article>
+                <article class="overview-card">
+                    <h3>下一阶段重点</h3>
+                    <p>做真实 marketplace、MCP 一键持久化安装、审批与权限、会话工作流、以及更完整的前端交互体验。</p>
+                </article>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-kicker">Runtime</p>
+                    <h2>MCP 运行状态</h2>
+                </div>
+                <button class="ghost-button" @click="refreshMcp">刷新 MCP 状态</button>
+            </div>
+            <div class="server-list">
+                <article v-for="server in mcpStatuses" :key="server.serverName" class="server-card">
+                    <div class="server-top">
+                        <div>
+                            <h3>{{ server.serverName }}</h3>
+                            <p class="server-transport">{{ server.transportType }} / {{ server.protocolVersion || '未协商' }}</p>
+                        </div>
+                        <span class="status-pill" :class="statusClass(server.connectionState)">{{ server.connectionState }}</span>
+                    </div>
+                    <p class="server-message">{{ server.message || '暂无状态说明' }}</p>
+                    <p class="server-error" v-if="server.lastError">最近错误：{{ server.lastError }}</p>
+                </article>
+                <p v-if="!mcpStatuses.length" class="empty-state">当前还没有启用中的 MCP server。</p>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-kicker">Catalog</p>
+                    <h2>统一目录</h2>
+                </div>
+            </div>
+            <div class="catalog-toolbar">
+                <input v-model="searchQuery" class="catalog-search" type="text" placeholder="搜索 MCP servers / agent skills / 标签">
+                <div class="filter-group">
+                    <button class="filter-chip" :class="{active: activeType === ''}" @click="activeType = ''">全部</button>
+                    <button class="filter-chip" :class="{active: activeType === 'AGENT_SKILL'}" @click="activeType = 'AGENT_SKILL'">Skills</button>
+                    <button class="filter-chip" :class="{active: activeType === 'MCP_SERVER'}" @click="activeType = 'MCP_SERVER'">MCP Servers</button>
+                </div>
+            </div>
+            <div class="catalog-grid">
+                <article v-for="item in filteredCatalogItems" :key="item.id" class="catalog-card">
+                    <div class="catalog-head">
+                        <div>
+                            <p class="catalog-type">{{ item.type === 'AGENT_SKILL' ? 'Agent Skill' : 'MCP Server' }}</p>
+                            <h3>{{ item.name }}</h3>
+                        </div>
+                        <span class="install-pill" :class="{installed: item.installed}">
+                            {{ item.installed ? '已接入' : '可安装' }}
+                        </span>
+                    </div>
+                    <p class="catalog-description">{{ item.description }}</p>
+                    <div class="tag-row">
+                        <span v-for="tag in item.tags" :key="tag" class="tag">{{ tag }}</span>
+                    </div>
+                    <p class="catalog-hint">{{ item.installHint }}</p>
+                    <div class="catalog-actions">
+                        <button v-if="item.type === 'AGENT_SKILL'" class="action-button small" @click="installSkill(item.id)" :disabled="loading.installingId === item.id">
+                            {{ loading.installingId === item.id ? '安装中...' : '安装 Skill' }}
+                        </button>
+                        <button v-else class="ghost-button small" @click="generateInstallPlan(item.id)" :disabled="loading.installingId === item.id">
+                            {{ loading.installingId === item.id ? '生成中...' : '生成配置模板' }}
+                        </button>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="panel two-column">
+            <div>
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-kicker">Capabilities</p>
+                        <h2>已安装能力</h2>
+                    </div>
+                    <button class="ghost-button" @click="refreshCapabilities">刷新能力</button>
+                </div>
+                <div class="capability-list">
+                    <article v-for="capability in capabilities" :key="capability.id" class="capability-card">
+                        <div class="capability-head">
+                            <h3>{{ capability.name }}</h3>
+                            <span class="capability-type">{{ capability.type }}</span>
+                        </div>
+                        <p class="capability-id">{{ capability.id }}</p>
+                        <p class="capability-desc">{{ capability.metadata?.description || '暂无描述' }}</p>
+                    </article>
+                    <p v-if="!capabilities.length" class="empty-state">当前还没有加载到能力。</p>
+                </div>
+            </div>
+
+            <div>
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-kicker">Install Plan</p>
+                        <h2>安装结果 / 配置模板</h2>
+                    </div>
+                </div>
+                <div class="install-result">
+                    <p v-if="!installResult" class="empty-state">点击“安装 Skill”或“生成配置模板”后，这里会显示结果。</p>
+                    <template v-else>
+                        <h3>{{ installResult.message }}</h3>
+                        <ul class="next-step-list">
+                            <li v-for="step in installResult.nextSteps" :key="step">{{ step }}</li>
+                        </ul>
+                        <pre v-if="installResult.generatedSnippet" class="snippet-box">{{ installResult.generatedSnippet }}</pre>
+                    </template>
+                </div>
+            </div>
+        </section>
+    </main>
+</div>
+<script src="/admin/app.js"></script>
+</body>
+</html>

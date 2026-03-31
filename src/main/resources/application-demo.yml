@@ -1,0 +1,21 @@
+agent:
+  mcp:
+    servers:
+      - name: demo-stdio
+        description: Built-in demo stdio MCP server from this repository
+        enabled: true
+        transport: stdio
+        command: powershell.exe
+        args:
+          - -ExecutionPolicy
+          - Bypass
+          - -File
+          - ./scripts/run-demo-mcp-stdio-server.ps1
+        timeout: 15s
+
+      - name: remote-gateway
+        description: Example streamable-http MCP server definition
+        enabled: false
+        transport: streamable-http
+        url: http://localhost:8787/mcp
+        timeout: 10s

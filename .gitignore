@@ -1,0 +1,9 @@
+/target/
+/.idea/
+/*.iml
+/\.env
+/\.env.local
+/src/main/resources/application-local.yml
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.env
