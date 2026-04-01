@@ -168,7 +168,9 @@ public class LocalSkillProvider implements CapabilityProvider {
                     stringValue(rawMap.get("group")),
                     stringValue(rawMap.get("summaryFromBranch")),
                     stringValue(rawMap.get("summaryFromGroup")),
-                    booleanValue(rawMap.get("continueOnFailure"))
+                    booleanValue(rawMap.get("continueOnFailure")),
+                    stringValue(rawMap.get("documentDocId")),
+                    stringValue(rawMap.get("documentDetailWhen"))
             ));
         }
         return List.copyOf(steps);

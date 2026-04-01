@@ -28,6 +28,8 @@
 - [x] 支持 workflow skill 基于汇总结果做更复杂的条件分支，可决定后续进入哪条 group
 - [x] 支持 workflow skill 的组合条件表达式，当前可用于 `when` 中的 `== / != / === / !== / > / >= / < / <= / in / not in / ! / && / || / ()`
 - [x] 支持 workflow skill 的轻量函数式条件，可在 `when` 中使用 `exists()`、`empty()`、`contains()`、`startsWith()`、`endsWith()`、`matches()`、`length()`、`number()`、`boolean()`、`string()`、`typeOf()`
+- [x] 扩展 workflow skill 条件引擎：支持函数嵌套、集合函数和时间/日期比较
+- [x] 让 workflow skill 可显式声明能力文档读取步骤，支持先读 `summary` 再按条件决定是否读取 `detail`
 - [x] 清理公开仓库默认敏感配置，数据库连接、管理员密码与 API Key 改为环境变量或空白模板
 - [x] 增加管理员资源总览、调用热度和审批概览
 - [x] 扩展管理员总览：支持最近 7 天调用趋势、资源状态分布和模型授权状态分布

@@ -101,9 +101,10 @@
 - workflow skill：
   - `when`
   - `when` 支持组合条件表达式（`== / != / === / !== / > / >= / < / <= / in / not in / ! / && / || / ()`）
-  - `when` 支持轻量函数式条件（如 `exists()`、`empty()`、`contains()`、`startsWith()`、`endsWith()`、`matches()`、`length()`、`number()`、`boolean()`、`string()`、`typeOf()`）
+  - `when` 支持轻量函数式条件（如 `exists()`、`empty()`、`contains()`、`containsAny()`、`containsAll()`、`intersects()`、`startsWith()`、`endsWith()`、`matches()`、`length()`、`count()`、`number()`、`boolean()`、`string()`、`typeOf()`、`date()`、`datetime()`、`today()`、`now()`、`daysBetween()`）
   - `capabilityId`
   - `capabilityInput`
+  - 支持显式文档步骤：先读 `summary`，再按 `documentDetailWhen` 决定是否继续读 `detail`
   - `continueOnFailure`
   - `branch / group`
   - `summaryFromBranch / summaryFromGroup`

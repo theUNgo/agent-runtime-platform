@@ -1,24 +1,38 @@
 package com.example.agentruntime.skill;
 
+import com.example.agentruntime.AgentRuntimeProperties;
 import com.example.agentruntime.builtin.BuiltinEchoCapability;
+import com.example.agentruntime.catalog.UnifiedCatalogService;
 import com.example.agentruntime.capability.AgentCapability;
 import com.example.agentruntime.capability.CapabilityContext;
 import com.example.agentruntime.capability.CapabilityDescriptor;
 import com.example.agentruntime.capability.CapabilityRegistry;
+import com.example.agentruntime.document.CapabilityDocumentService;
 import com.example.agentruntime.i18n.MessageService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import org.springframework.context.support.StaticMessageSource;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class WorkflowSkillBindingTest {
+
+    @TempDir
+    Path tempDir;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final MessageService messageService = messageService();
@@ -709,7 +723,149 @@ class WorkflowSkillBindingTest {
         assertTrue(result.output().path("steps").get(1).path("when").asText().contains("empty("));
     }
 
+    @Test
+    void shouldSupportNestedFunctionsCollectionFunctionsAndDateComparison() {
+        SkillManifest manifest = new SkillManifest(
+                "binding-skill-advanced-functions",
+                "Binding Skill Advanced Functions",
+                "0.1.0",
+                "Workflow with nested functions, collection functions and date comparison",
+                "workflow",
+                "workflows/demo.yaml",
+                null,
+                null,
+                List.of("workflow", "condition", "advanced"),
+                List.of(
+                        new SkillWorkflowStep(
+                                "advanced-route",
+                                "高级条件路径",
+                                "命中嵌套函数、集合函数和日期比较后进入 advanced-path",
+                                "advancedRoute",
+                                "contains(string(typeOf(date(input.deadline))), 'date') && containsAny(input.labels, [bug, string(input.priority)]) && containsAll(input.labels, [bug, string(input.priority)]) && intersects(input.labels, [review, string(input.priority)]) && date(input.deadline) >= today() && datetime(input.updatedAt) <= now() && daysBetween(today(), date(input.deadline)) >= 0",
+                                null,
+                                null,
+                                "judge",
+                                "advanced-path",
+                                null,
+                                null,
+                                false
+                        )
+                )
+        );
+
+        ExecutableWorkflowSkill skill = new ExecutableWorkflowSkill(
+                manifest,
+                objectMapper,
+                messageService,
+                workflowExecutionSupport()
+        );
+
+        var result = skill.execute(
+                new CapabilityContext("conversation-1", "测试高级条件表达式", ".", null),
+                objectMapper.createObjectNode()
+                        .put("deadline", LocalDate.now().plusDays(2).toString())
+                        .put("updatedAt", Instant.now().minusSeconds(30).toString())
+                        .put("priority", "urgent")
+                        .set("labels", objectMapper.createArrayNode().add("bug").add("urgent").add("review"))
+        );
+
+        assertTrue(result.success());
+        assertEquals("SUCCESS", result.output().path("steps").get(0).path("status").asText());
+        assertEquals("SUCCESS", result.output().path("workflowGroupState").path("advanced-path").path("status").asText());
+        assertTrue(result.output().path("steps").get(0).path("when").asText().contains("containsAny"));
+        assertTrue(result.output().path("steps").get(0).path("when").asText().contains("date("));
+    }
+
+    @Test
+    void shouldReadSummaryThenDetailForDocumentWorkflowStep() throws Exception {
+        Path skillsDir = tempDir.resolve("skills");
+        Path skillDir = skillsDir.resolve("code-review");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("skill.yaml"), """
+                id: code-review
+                name: Code Review
+                version: 1.0.0
+                description: 用于测试文档型 workflow 步骤。
+                type: prompt
+                prompt: |
+                  这是一个测试 skill。
+                tags:
+                  - review
+                  - docs
+                """);
+        Files.writeString(skillDir.resolve("summary.md"), "# Code Review\n\n需要详情时再继续读取。");
+        Files.writeString(skillDir.resolve("detail.md"), "# Code Review Detail\n\n这里是详细执行说明。");
+
+        SkillManifest manifest = new SkillManifest(
+                "binding-skill-document",
+                "Binding Skill Document",
+                "0.1.0",
+                "Workflow with explicit document step",
+                "workflow",
+                "workflows/demo.yaml",
+                null,
+                null,
+                List.of("workflow", "docs"),
+                List.of(
+                        new SkillWorkflowStep(
+                                "load-code-review-doc",
+                                "读取 code-review 文档",
+                                "先读取摘要，再按摘要内容决定是否继续读取详情。",
+                                "codeReviewDoc",
+                                null,
+                                null,
+                                null,
+                                "knowledge",
+                                "docs",
+                                null,
+                                null,
+                                false,
+                                "skill:code-review",
+                                "contains(state.codeReviewDoc.summary.content, '需要详情')"
+                        ),
+                        new SkillWorkflowStep(
+                                "consume-detail",
+                                "消费详情文档",
+                                "详情内容：{{state.codeReviewDoc.detail.content}}",
+                                "detailSummary",
+                                "state.codeReviewDoc.detailLoaded == true",
+                                null,
+                                null,
+                                "knowledge",
+                                "docs",
+                                null,
+                                null,
+                                false
+                        )
+                )
+        );
+
+        ExecutableWorkflowSkill skill = new ExecutableWorkflowSkill(
+                manifest,
+                objectMapper,
+                messageService,
+                workflowExecutionSupport(skillsDir)
+        );
+
+        var result = skill.execute(
+                new CapabilityContext("conversation-1", "测试 workflow 文档步骤", ".", null),
+                objectMapper.createObjectNode()
+        );
+
+        assertTrue(result.success());
+        assertEquals("SUCCESS", result.output().path("steps").get(0).path("status").asText());
+        assertTrue(result.output().path("steps").get(0).path("documentResult").path("output").path("summaryLoaded").asBoolean());
+        assertTrue(result.output().path("steps").get(0).path("documentResult").path("output").path("detailLoaded").asBoolean());
+        assertTrue(result.output().path("state").path("codeReviewDoc").path("detail").path("content").asText().contains("详细执行说明"));
+        assertEquals("SUCCESS", result.output().path("steps").get(1).path("status").asText());
+        assertTrue(result.output().path("steps").get(1).path("renderedInstruction").asText().contains("详细执行说明"));
+    }
+
     private WorkflowSkillExecutionSupport workflowExecutionSupport() {
+        return workflowExecutionSupport(null);
+    }
+
+    private WorkflowSkillExecutionSupport workflowExecutionSupport(Path skillsDir) {
         AgentCapability echoCapability = new BuiltinEchoCapability(objectMapper, messageService);
         CapabilityRegistry registry = new CapabilityRegistry() {
             @Override
@@ -735,7 +891,34 @@ class WorkflowSkillBindingTest {
         };
         StaticListableBeanFactory beanFactory = new StaticListableBeanFactory();
         beanFactory.addBean("capabilityRegistry", registry);
-        return new WorkflowSkillExecutionSupport(beanFactory.getBeanProvider(CapabilityRegistry.class), objectMapper, messageService);
+        if (skillsDir != null) {
+            UnifiedCatalogService catalogService = mock(UnifiedCatalogService.class);
+            when(catalogService.search(null, null)).thenReturn(List.of());
+            CapabilityDocumentService documentService = new CapabilityDocumentService(
+                    properties(skillsDir),
+                    catalogService,
+                    messageService
+            );
+            beanFactory.addBean("capabilityDocumentService", documentService);
+        }
+        return new WorkflowSkillExecutionSupport(
+                beanFactory.getBeanProvider(CapabilityRegistry.class),
+                beanFactory.getBeanProvider(CapabilityDocumentService.class),
+                objectMapper,
+                messageService
+        );
+    }
+
+    private AgentRuntimeProperties properties(Path skillsDir) {
+        return new AgentRuntimeProperties(
+                skillsDir.toString(),
+                tempDir.toString(),
+                new AgentRuntimeProperties.AuthProperties(true, Duration.ofDays(30), "admin", "test-bootstrap-password", "Admin"),
+                new AgentRuntimeProperties.McpProperties(List.of()),
+                new AgentRuntimeProperties.SecurityProperties(
+                        new AgentRuntimeProperties.CryptoProperties("ChangeThisDevelopmentCryptoSecret-32CharsMin")
+                )
+        );
     }
 
     private MessageService messageService() {
@@ -744,7 +927,10 @@ class WorkflowSkillBindingTest {
         source.addMessage("capability.builtin.echo.name", Locale.ENGLISH, "Echo");
         source.addMessage("capability.builtin.echo.description", Locale.ENGLISH, "Echo capability");
         source.addMessage("capability.builtin.echo.success", Locale.ENGLISH, "echo success");
+        source.addMessage("capability.builtin.docRead.success", Locale.ENGLISH, "doc read success");
         source.addMessage("skill.workflow.error.registryUnavailable", Locale.ENGLISH, "registry unavailable");
+        source.addMessage("skill.workflow.error.documentServiceUnavailable", Locale.ENGLISH, "document service unavailable");
+        source.addMessage("skill.workflow.error.documentIdRequired", Locale.ENGLISH, "document id required");
         source.addMessage("skill.workflow.error.capabilityNotFound", Locale.ENGLISH, "capability missing: {0}");
         source.addMessage("skill.workflow.error.selfInvocation", Locale.ENGLISH, "self invocation: {0}");
         source.addMessage("skill.workflow.error.executionFailed", Locale.ENGLISH, "workflow execution failed");
@@ -752,7 +938,10 @@ class WorkflowSkillBindingTest {
         source.addMessage("capability.builtin.echo.name", Locale.SIMPLIFIED_CHINESE, "Echo");
         source.addMessage("capability.builtin.echo.description", Locale.SIMPLIFIED_CHINESE, "Echo capability");
         source.addMessage("capability.builtin.echo.success", Locale.SIMPLIFIED_CHINESE, "echo success");
+        source.addMessage("capability.builtin.docRead.success", Locale.SIMPLIFIED_CHINESE, "doc read success");
         source.addMessage("skill.workflow.error.registryUnavailable", Locale.SIMPLIFIED_CHINESE, "registry unavailable");
+        source.addMessage("skill.workflow.error.documentServiceUnavailable", Locale.SIMPLIFIED_CHINESE, "document service unavailable");
+        source.addMessage("skill.workflow.error.documentIdRequired", Locale.SIMPLIFIED_CHINESE, "document id required");
         source.addMessage("skill.workflow.error.capabilityNotFound", Locale.SIMPLIFIED_CHINESE, "capability missing: {0}");
         source.addMessage("skill.workflow.error.selfInvocation", Locale.SIMPLIFIED_CHINESE, "self invocation: {0}");
         source.addMessage("skill.workflow.error.executionFailed", Locale.SIMPLIFIED_CHINESE, "workflow execution failed");

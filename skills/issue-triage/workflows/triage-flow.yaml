@@ -13,10 +13,19 @@ steps:
     outputKey: inputSummary
     branch: triage
     group: intake
+  - id: read-code-review-doc
+    title: 读取 code-review 能力文档
+    instruction: |
+      先读取 code-review 的摘要文档，再根据摘要内容决定是否继续读取详情。
+    outputKey: codeReviewDoc
+    branch: triage
+    group: knowledge
+    documentDocId: skill:code-review
+    documentDetailWhen: contains(state.codeReviewDoc.summary.content, '评审')
   - id: propose-next-step
     title: 生成下一步建议
     instruction: |
-      基于当前工作区 {{workspaceRoot}} 和已知上下文，给出一条最适合继续推进的处理建议。
+      基于当前工作区 {{workspaceRoot}}、已知上下文以及能力文档摘要，给出一条最适合继续推进的处理建议。
     outputKey: nextStep
     branch: triage
     group: decision

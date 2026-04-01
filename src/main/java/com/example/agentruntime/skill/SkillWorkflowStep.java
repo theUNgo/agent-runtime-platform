@@ -17,8 +17,30 @@ public record SkillWorkflowStep(
         String group,
         String summaryFromBranch,
         String summaryFromGroup,
-        Boolean continueOnFailure
+        Boolean continueOnFailure,
+        String documentDocId,
+        String documentDetailWhen
 ) {
+
+    /**
+     * 兼容旧版 workflow 步骤构造方式。
+     * 在没有显式文档读取声明时，默认不绑定能力文档动态读取行为。
+     */
+    public SkillWorkflowStep(String id,
+                             String title,
+                             String instruction,
+                             String outputKey,
+                             String when,
+                             String capabilityId,
+                             Object capabilityInput,
+                             String branch,
+                             String group,
+                             String summaryFromBranch,
+                             String summaryFromGroup,
+                             Boolean continueOnFailure) {
+        this(id, title, instruction, outputKey, when, capabilityId, capabilityInput, branch, group,
+                summaryFromBranch, summaryFromGroup, continueOnFailure, null, null);
+    }
 
     public SkillWorkflowStep {
         id = id == null || id.isBlank() ? "step" : id;
@@ -32,5 +54,7 @@ public record SkillWorkflowStep(
         summaryFromBranch = summaryFromBranch == null || summaryFromBranch.isBlank() ? null : summaryFromBranch;
         summaryFromGroup = summaryFromGroup == null || summaryFromGroup.isBlank() ? null : summaryFromGroup;
         continueOnFailure = continueOnFailure != null && continueOnFailure;
+        documentDocId = documentDocId == null || documentDocId.isBlank() ? null : documentDocId;
+        documentDetailWhen = documentDetailWhen == null || documentDetailWhen.isBlank() ? null : documentDetailWhen;
     }
 }

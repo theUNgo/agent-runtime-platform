@@ -4,6 +4,8 @@ import com.example.agentruntime.capability.AgentCapability;
 import com.example.agentruntime.capability.CapabilityContext;
 import com.example.agentruntime.capability.CapabilityRegistry;
 import com.example.agentruntime.capability.CapabilityResult;
+import com.example.agentruntime.document.CapabilityDocumentService;
+import com.example.agentruntime.document.CapabilityDocumentView;
 import com.example.agentruntime.i18n.MessageService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,7 +16,17 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -29,13 +41,16 @@ public class WorkflowSkillExecutionSupport {
 
     private static final Pattern TEMPLATE_PATTERN = Pattern.compile("\\{\\{\\s*([^{}]+?)\\s*}}");
     private final ObjectProvider<CapabilityRegistry> capabilityRegistryProvider;
+    private final ObjectProvider<CapabilityDocumentService> capabilityDocumentServiceProvider;
     private final ObjectMapper objectMapper;
     private final MessageService messageService;
 
     public WorkflowSkillExecutionSupport(ObjectProvider<CapabilityRegistry> capabilityRegistryProvider,
+                                         ObjectProvider<CapabilityDocumentService> capabilityDocumentServiceProvider,
                                          ObjectMapper objectMapper,
                                          MessageService messageService) {
         this.capabilityRegistryProvider = capabilityRegistryProvider;
+        this.capabilityDocumentServiceProvider = capabilityDocumentServiceProvider;
         this.objectMapper = objectMapper;
         this.messageService = messageService;
     }
@@ -123,6 +138,73 @@ public class WorkflowSkillExecutionSupport {
     }
 
     /**
+     * 判断任意 when 表达式是否命中。
+     * 这个入口主要给 workflow 的派生能力使用，例如文档摘要读完后再决定是否继续加载 detail。
+     */
+    public boolean evaluateWhenExpression(String when,
+                                          CapabilityContext context,
+                                          JsonNode input,
+                                          ObjectNode workflowState) {
+        if (when == null || when.isBlank()) {
+            return true;
+        }
+        SkillWorkflowStep probeStep = new SkillWorkflowStep(
+                "condition-probe",
+                "condition-probe",
+                "",
+                "condition-probe",
+                when,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false
+        );
+        return shouldExecute(probeStep, context, input, workflowState);
+    }
+
+    /**
+     * 执行 workflow 中显式声明的能力文档读取步骤。
+     * 约定先读取 summary，再根据 documentDetailWhen 决定是否继续读取 detail。
+     */
+    public CapabilityResult readCapabilityDocumentStep(SkillWorkflowStep step,
+                                                       CapabilityContext context,
+                                                       JsonNode input,
+                                                       ObjectNode workflowState) {
+        CapabilityDocumentService documentService = capabilityDocumentServiceProvider.getIfAvailable();
+        if (documentService == null) {
+            throw new IllegalStateException(messageService.get("skill.workflow.error.documentServiceUnavailable"));
+        }
+
+        String renderedDocId = renderTemplate(step.documentDocId(), context, input, workflowState).trim();
+        if (renderedDocId.isBlank()) {
+            throw new IllegalArgumentException(messageService.get("skill.workflow.error.documentIdRequired"));
+        }
+
+        CapabilityDocumentView summary = documentService.read(renderedDocId, "summary");
+        ObjectNode output = objectMapper.createObjectNode();
+        output.put("docId", renderedDocId);
+        output.put("summaryLoaded", true);
+        output.put("detailLoaded", false);
+        output.set("summary", documentToNode(summary));
+        output.set("detail", JsonNodeFactory.instance.nullNode());
+
+        ObjectNode simulatedState = workflowState.deepCopy();
+        simulatedState.set(step.outputKey(), output.deepCopy());
+        simulatedState.set(step.id(), output.deepCopy());
+
+        if (step.documentDetailWhen() != null && evaluateWhenExpression(step.documentDetailWhen(), context, input, simulatedState)) {
+            CapabilityDocumentView detail = documentService.read(renderedDocId, "detail");
+            output.put("detailLoaded", true);
+            output.set("detail", documentToNode(detail));
+        }
+
+        return CapabilityResult.success(messageService.get("capability.builtin.docRead.success"), output);
+    }
+
+    /**
      * 将步骤产物写入 workflow 状态，供后续步骤引用。
      */
     public void rememberStepOutput(ObjectNode workflowState, SkillWorkflowStep step, JsonNode value) {
@@ -157,6 +239,9 @@ public class WorkflowSkillExecutionSupport {
         meta.put("success", capabilityResult != null && capabilityResult.success());
         if (step.capabilityId() != null) {
             meta.put("capabilityId", step.capabilityId());
+        }
+        if (step.documentDocId() != null) {
+            meta.put("documentDocId", step.documentDocId());
         }
         if (capabilityResult != null) {
             meta.put("message", safe(capabilityResult.message()));
@@ -575,6 +660,12 @@ public class WorkflowSkillExecutionSupport {
                 || operand.startsWith("state.")) {
             return resolveExpressionValue(operand, context, input, workflowState);
         }
+        if (looksLikeFunctionInvocation(operand)) {
+            return parseValueExpression(operand, context, input, workflowState);
+        }
+        if (operand.startsWith("[") && operand.endsWith("]")) {
+            return parseCollectionLiteral(operand, context, input, workflowState);
+        }
         Object literalValue = parseLiteralValue(operand);
         return literalValue == null && !"null".equalsIgnoreCase(operand) ? operand : literalValue;
     }
@@ -645,6 +736,49 @@ public class WorkflowSkillExecutionSupport {
     }
 
     /**
+     * 解析单个值表达式。
+     * 这个入口主要用于支持独立函数调用和集合字面量内部的嵌套函数。
+     */
+    private Object parseValueExpression(String expression,
+                                        CapabilityContext context,
+                                        JsonNode input,
+                                        ObjectNode workflowState) {
+        ConditionParser parser = new ConditionParser(tokenizeConditionExpression(expression), context, input, workflowState);
+        return parser.parseValueExpression();
+    }
+
+    private boolean looksLikeFunctionInvocation(String operand) {
+        if (operand == null || operand.isBlank()) {
+            return false;
+        }
+        int leftParen = operand.indexOf('(');
+        int rightParen = operand.lastIndexOf(')');
+        if (leftParen <= 0 || rightParen != operand.length() - 1) {
+            return false;
+        }
+        return isFunctionName(operand.substring(0, leftParen).trim());
+    }
+
+    /**
+     * 解析集合字面量。
+     * 这里会递归解析集合内的模板、路径和函数表达式，供 in / containsAny 等集合函数直接复用。
+     */
+    private List<Object> parseCollectionLiteral(String operand,
+                                                CapabilityContext context,
+                                                JsonNode input,
+                                                ObjectNode workflowState) {
+        String content = operand.substring(1, operand.length() - 1).trim();
+        if (content.isEmpty()) {
+            return List.of();
+        }
+        List<Object> items = new ArrayList<>();
+        for (String item : splitCollectionItems(content)) {
+            items.add(resolveConditionValue(item, context, input, workflowState));
+        }
+        return items;
+    }
+
+    /**
      * 把单个值解释成布尔真值。
      * 这里与 shouldExecute 的兜底规则保持一致，并且额外支持布尔、数值、集合和对象类型。
      */
@@ -657,6 +791,9 @@ public class WorkflowSkillExecutionSupport {
         }
         if (value instanceof BigDecimal numericValue) {
             return numericValue.compareTo(BigDecimal.ZERO) != 0;
+        }
+        if (value instanceof Iterable<?> iterable) {
+            return iterable.iterator().hasNext();
         }
         if (value instanceof JsonNode node) {
             if (node.isArray()) {
@@ -691,24 +828,8 @@ public class WorkflowSkillExecutionSupport {
                                         CapabilityContext context,
                                         JsonNode input,
                                         ObjectNode workflowState) {
-        if (rightValue instanceof JsonNode node && node.isArray()) {
-            for (JsonNode item : node) {
-                if (strictEquals(leftValue, toTypedConditionValue(item))) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        String normalizedCollection = toStringValue(rightValue).trim();
-        if (!normalizedCollection.startsWith("[") || !normalizedCollection.endsWith("]")) {
-            return false;
-        }
-        String content = normalizedCollection.substring(1, normalizedCollection.length() - 1).trim();
-        if (content.isEmpty()) {
-            return false;
-        }
-        for (String item : splitCollectionItems(content)) {
-            if (strictEquals(leftValue, resolveConditionValue(item, context, input, workflowState))) {
+        for (Object item : toCollectionValues(rightValue, context, input, workflowState)) {
+            if (strictEquals(leftValue, item)) {
                 return true;
             }
         }
@@ -773,6 +894,11 @@ public class WorkflowSkillExecutionSupport {
         if (leftNumber != null && rightNumber != null) {
             return leftNumber.compareTo(rightNumber);
         }
+        TemporalComparable leftTemporal = parseTemporalComparable(leftOperand);
+        TemporalComparable rightTemporal = parseTemporalComparable(rightOperand);
+        if (leftTemporal != null && rightTemporal != null) {
+            return leftTemporal.sortValue().compareTo(rightTemporal.sortValue());
+        }
         return toStringValue(leftOperand).compareToIgnoreCase(toStringValue(rightOperand));
     }
 
@@ -805,6 +931,11 @@ public class WorkflowSkillExecutionSupport {
         BigDecimal rightNumber = parseNumber(rightValue);
         if (leftNumber != null && rightNumber != null) {
             return leftNumber.compareTo(rightNumber) == 0;
+        }
+        TemporalComparable leftTemporal = parseTemporalComparable(leftValue);
+        TemporalComparable rightTemporal = parseTemporalComparable(rightValue);
+        if (leftTemporal != null && rightTemporal != null) {
+            return leftTemporal.sortValue().compareTo(rightTemporal.sortValue()) == 0;
         }
         return toStringValue(leftValue).equalsIgnoreCase(toStringValue(rightValue));
     }
@@ -861,6 +992,9 @@ public class WorkflowSkillExecutionSupport {
             case "exists" -> requireArgCount(normalized, arguments, 1) && !isMissing(arguments.getFirst());
             case "empty" -> requireArgCount(normalized, arguments, 1) && isEmpty(arguments.getFirst());
             case "contains" -> containsFunction(arguments);
+            case "containsany" -> containsAnyFunction(arguments);
+            case "containsall" -> containsAllFunction(arguments);
+            case "intersects" -> intersectsFunction(arguments);
             case "startswith" -> requireArgCount(normalized, arguments, 2)
                     && toStringValue(arguments.getFirst()).startsWith(toStringValue(arguments.get(1)));
             case "endswith" -> requireArgCount(normalized, arguments, 2)
@@ -868,10 +1002,16 @@ public class WorkflowSkillExecutionSupport {
             case "matches" -> requireArgCount(normalized, arguments, 2)
                     && toStringValue(arguments.getFirst()).matches(toStringValue(arguments.get(1)));
             case "length" -> lengthFunction(arguments);
+            case "count" -> lengthFunction(arguments);
             case "number" -> requireArgCount(normalized, arguments, 1) ? parseNumber(arguments.getFirst()) : null;
             case "boolean" -> requireArgCount(normalized, arguments, 1) && toBooleanValue(arguments.getFirst());
             case "string" -> requireArgCount(normalized, arguments, 1) ? toStringValue(arguments.getFirst()) : "";
             case "typeof" -> requireArgCount(normalized, arguments, 1) ? valueTypeOf(arguments.getFirst()) : "unknown";
+            case "date" -> dateFunction(arguments);
+            case "datetime" -> datetimeFunction(arguments);
+            case "today" -> requireArgCount(normalized, arguments, 0) ? LocalDate.now(ZoneId.systemDefault()) : null;
+            case "now" -> requireArgCount(normalized, arguments, 0) ? Instant.now() : null;
+            case "daysbetween" -> daysBetweenFunction(arguments);
             default -> throw new IllegalArgumentException("Unsupported workflow function");
         };
     }
@@ -887,28 +1027,33 @@ public class WorkflowSkillExecutionSupport {
         requireArgCount("contains", arguments, 2);
         Object container = arguments.getFirst();
         Object target = arguments.get(1);
-        if (container instanceof JsonNode node) {
-            if (node.isArray()) {
-                for (JsonNode item : node) {
-                    if (strictEquals(toTypedConditionValue(item), target)) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            return toStringValue(node).contains(toStringValue(target));
+        if (isCollectionLike(container)) {
+            List<Object> collection = toCollectionValues(container, null, null, null);
+            return collection.stream().anyMatch(item -> strictEquals(item, target));
         }
-        String containerText = toStringValue(container);
-        if (containerText.startsWith("[") && containerText.endsWith("]")) {
-            String content = containerText.substring(1, containerText.length() - 1).trim();
-            for (String item : splitCollectionItems(content)) {
-                if (strictEquals(parseLiteralValue(item), target) || item.equals(toStringValue(target))) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        return containerText.contains(toStringValue(target));
+        return toStringValue(container).contains(toStringValue(target));
+    }
+
+    private boolean containsAnyFunction(List<Object> arguments) {
+        requireArgCount("containsAny", arguments, 2);
+        List<Object> leftValues = toCollectionValues(arguments.getFirst(), null, null, null);
+        List<Object> rightValues = toCollectionValues(arguments.get(1), null, null, null);
+        return rightValues.stream().anyMatch(target -> leftValues.stream().anyMatch(item -> strictEquals(item, target)));
+    }
+
+    private boolean containsAllFunction(List<Object> arguments) {
+        requireArgCount("containsAll", arguments, 2);
+        List<Object> leftValues = toCollectionValues(arguments.getFirst(), null, null, null);
+        List<Object> rightValues = toCollectionValues(arguments.get(1), null, null, null);
+        return !rightValues.isEmpty()
+                && rightValues.stream().allMatch(target -> leftValues.stream().anyMatch(item -> strictEquals(item, target)));
+    }
+
+    private boolean intersectsFunction(List<Object> arguments) {
+        requireArgCount("intersects", arguments, 2);
+        List<Object> leftValues = toCollectionValues(arguments.getFirst(), null, null, null);
+        List<Object> rightValues = toCollectionValues(arguments.get(1), null, null, null);
+        return leftValues.stream().anyMatch(left -> rightValues.stream().anyMatch(right -> strictEquals(left, right)));
     }
 
     private BigDecimal lengthFunction(java.util.List<Object> arguments) {
@@ -936,6 +1081,9 @@ public class WorkflowSkillExecutionSupport {
                     || (node.isArray() && node.isEmpty())
                     || (node.isObject() && node.isEmpty());
         }
+        if (value instanceof Iterable<?> iterable) {
+            return !iterable.iterator().hasNext();
+        }
         return value instanceof String stringValue && stringValue.isBlank();
     }
 
@@ -953,11 +1101,20 @@ public class WorkflowSkillExecutionSupport {
         if (value == null) {
             return "null";
         }
+        if (value instanceof LocalDate) {
+            return "date";
+        }
+        if (value instanceof Instant || value instanceof OffsetDateTime || value instanceof ZonedDateTime || value instanceof LocalDateTime) {
+            return "datetime";
+        }
         if (value instanceof Boolean) {
             return "boolean";
         }
         if (value instanceof BigDecimal || value instanceof Number) {
             return "number";
+        }
+        if (value instanceof Iterable<?>) {
+            return "array";
         }
         if (value instanceof JsonNode node) {
             if (node.isArray()) {
@@ -977,6 +1134,202 @@ public class WorkflowSkillExecutionSupport {
             }
         }
         return "string";
+    }
+
+    /**
+     * 把不同形态的集合输入统一转成值列表。
+     * 既支持 JsonNode 数组，也支持 workflow 条件里常见的 `[a, b, c]` 轻量字面量。
+     */
+    private List<Object> toCollectionValues(Object value,
+                                            CapabilityContext context,
+                                            JsonNode input,
+                                            ObjectNode workflowState) {
+        if (value == null) {
+            return List.of();
+        }
+        if (value instanceof List<?> listValue) {
+            return listValue.stream().map(this::normalizeCollectionItem).toList();
+        }
+        if (value instanceof Iterable<?> iterable) {
+            List<Object> items = new ArrayList<>();
+            for (Object item : iterable) {
+                items.add(normalizeCollectionItem(item));
+            }
+            return items;
+        }
+        if (value instanceof JsonNode node) {
+            if (node.isArray()) {
+                List<Object> items = new ArrayList<>();
+                for (JsonNode item : node) {
+                    items.add(toTypedConditionValue(item));
+                }
+                return items;
+            }
+            return List.of(toTypedConditionValue(node));
+        }
+        String text = toStringValue(value).trim();
+        if (text.startsWith("[") && text.endsWith("]")) {
+            if (context != null || input != null || workflowState != null) {
+                return parseCollectionLiteral(text, context, input, workflowState);
+            }
+            String content = text.substring(1, text.length() - 1).trim();
+            if (content.isEmpty()) {
+                return List.of();
+            }
+            List<Object> items = new ArrayList<>();
+            for (String item : splitCollectionItems(content)) {
+                items.add(parseLiteralValue(item));
+            }
+            return List.copyOf(items);
+        }
+        return List.of(value);
+    }
+
+    private Object normalizeCollectionItem(Object value) {
+        if (value instanceof JsonNode node) {
+            return toTypedConditionValue(node);
+        }
+        return value;
+    }
+
+    private boolean isCollectionLike(Object value) {
+        if (value == null) {
+            return false;
+        }
+        if (value instanceof Iterable<?>) {
+            return true;
+        }
+        if (value instanceof JsonNode node) {
+            return node.isArray();
+        }
+        String text = toStringValue(value).trim();
+        return text.startsWith("[") && text.endsWith("]");
+    }
+
+    private LocalDate dateFunction(List<Object> arguments) {
+        requireArgCount("date", arguments, 1);
+        TemporalComparable temporalComparable = parseTemporalComparable(arguments.getFirst());
+        if (temporalComparable == null) {
+            return null;
+        }
+        if ("date".equals(temporalComparable.type()) && temporalComparable.originalValue() instanceof LocalDate localDate) {
+            return localDate;
+        }
+        return Instant.ofEpochMilli(temporalComparable.sortValue().longValue())
+                .atZone(ZoneId.systemDefault())
+                .toLocalDate();
+    }
+
+    private Instant datetimeFunction(List<Object> arguments) {
+        requireArgCount("datetime", arguments, 1);
+        TemporalComparable temporalComparable = parseTemporalComparable(arguments.getFirst());
+        if (temporalComparable == null) {
+            return null;
+        }
+        if (temporalComparable.originalValue() instanceof LocalDate localDate) {
+            return localDate.atStartOfDay(ZoneId.systemDefault()).toInstant();
+        }
+        return Instant.ofEpochMilli(temporalComparable.sortValue().longValue());
+    }
+
+    private BigDecimal daysBetweenFunction(List<Object> arguments) {
+        requireArgCount("daysBetween", arguments, 2);
+        LocalDate start = coerceToLocalDate(arguments.getFirst());
+        LocalDate end = coerceToLocalDate(arguments.get(1));
+        if (start == null || end == null) {
+            return BigDecimal.ZERO;
+        }
+        return BigDecimal.valueOf(ChronoUnit.DAYS.between(start, end));
+    }
+
+    private LocalDate coerceToLocalDate(Object value) {
+        TemporalComparable temporalComparable = parseTemporalComparable(value);
+        if (temporalComparable == null) {
+            return null;
+        }
+        if (temporalComparable.originalValue() instanceof LocalDate localDate) {
+            return localDate;
+        }
+        return Instant.ofEpochMilli(temporalComparable.sortValue().longValue())
+                .atZone(ZoneId.systemDefault())
+                .toLocalDate();
+    }
+
+    private TemporalComparable parseTemporalComparable(Object rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+        if (rawValue instanceof JsonNode node) {
+            if (node.isTextual()) {
+                return parseTemporalComparable(node.asText());
+            }
+            return null;
+        }
+        if (rawValue instanceof LocalDate localDate) {
+            return new TemporalComparable("date", BigDecimal.valueOf(localDate.toEpochDay()), localDate);
+        }
+        if (rawValue instanceof Instant instant) {
+            return new TemporalComparable("datetime", BigDecimal.valueOf(instant.toEpochMilli()), instant);
+        }
+        if (rawValue instanceof OffsetDateTime offsetDateTime) {
+            Instant instant = offsetDateTime.toInstant();
+            return new TemporalComparable("datetime", BigDecimal.valueOf(instant.toEpochMilli()), instant);
+        }
+        if (rawValue instanceof ZonedDateTime zonedDateTime) {
+            Instant instant = zonedDateTime.toInstant();
+            return new TemporalComparable("datetime", BigDecimal.valueOf(instant.toEpochMilli()), instant);
+        }
+        if (rawValue instanceof LocalDateTime localDateTime) {
+            Instant instant = localDateTime.atZone(ZoneId.systemDefault()).toInstant();
+            return new TemporalComparable("datetime", BigDecimal.valueOf(instant.toEpochMilli()), instant);
+        }
+        String normalized = String.valueOf(rawValue).trim();
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        try {
+            Instant instant = Instant.parse(normalized);
+            return new TemporalComparable("datetime", BigDecimal.valueOf(instant.toEpochMilli()), instant);
+        } catch (DateTimeParseException ignored) {
+        }
+        try {
+            Instant instant = OffsetDateTime.parse(normalized).toInstant();
+            return new TemporalComparable("datetime", BigDecimal.valueOf(instant.toEpochMilli()), instant);
+        } catch (DateTimeParseException ignored) {
+        }
+        try {
+            Instant instant = ZonedDateTime.parse(normalized).toInstant();
+            return new TemporalComparable("datetime", BigDecimal.valueOf(instant.toEpochMilli()), instant);
+        } catch (DateTimeParseException ignored) {
+        }
+        try {
+            LocalDateTime localDateTime = LocalDateTime.parse(normalized);
+            Instant instant = localDateTime.atZone(ZoneId.systemDefault()).toInstant();
+            return new TemporalComparable("datetime", BigDecimal.valueOf(instant.toEpochMilli()), instant);
+        } catch (DateTimeParseException ignored) {
+        }
+        try {
+            LocalDate localDate = LocalDate.parse(normalized);
+            return new TemporalComparable("date", BigDecimal.valueOf(localDate.toEpochDay()), localDate);
+        } catch (DateTimeParseException ignored) {
+        }
+        return null;
+    }
+
+    private ObjectNode documentToNode(CapabilityDocumentView document) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("docId", document.docId());
+        node.put("capabilityId", document.capabilityId());
+        node.put("name", document.name());
+        node.put("capabilityType", document.capabilityType());
+        node.put("docType", document.docType());
+        node.put("content", document.content());
+        ArrayNode tags = node.putArray("tags");
+        document.tags().forEach(tags::add);
+        return node;
+    }
+
+    private record TemporalComparable(String type, BigDecimal sortValue, Object originalValue) {
     }
 
     private record ConditionToken(ConditionTokenType type, String value) {
@@ -1030,6 +1383,18 @@ public class WorkflowSkillExecutionSupport {
                 throw new IllegalArgumentException("Unexpected trailing condition token");
             }
             return result;
+        }
+
+        /**
+         * 仅解析一个值表达式。
+         * 这个入口用于支持集合字面量中的函数嵌套和独立函数调用。
+         */
+        private Object parseValueExpression() {
+            Object value = parseValueOperand();
+            if (index != tokens.size()) {
+                throw new IllegalArgumentException("Unexpected trailing value token");
+            }
+            return value;
         }
 
         private boolean parseOr() {

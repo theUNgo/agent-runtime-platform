@@ -105,6 +105,14 @@ public class ExecutableWorkflowSkill implements Skill {
                 stepNode.put("when", step.when());
                 stepNode.put("renderedWhen", executionSupport.renderTemplate(step.when(), context, input, workflowState));
             }
+            if (step.documentDocId() != null) {
+                stepNode.put("documentDocId", executionSupport.renderTemplate(step.documentDocId(), context, input, workflowState));
+            }
+            if (step.documentDetailWhen() != null) {
+                stepNode.put("documentDetailWhen", step.documentDetailWhen());
+                stepNode.put("renderedDocumentDetailWhen",
+                        executionSupport.renderTemplate(step.documentDetailWhen(), context, input, workflowState));
+            }
 
             if (!shouldExecute) {
                 stepNode.put("status", "SKIPPED");
@@ -134,6 +142,50 @@ public class ExecutableWorkflowSkill implements Skill {
                 updateBranchAndGroupState(workflowState, stepNode);
                 renderedSummaries.add(step.title() + "：" + aggregateOutput.path("summary").asText(""));
                 continue;
+            }
+
+            if (step.documentDocId() != null) {
+                executedStepIds.add(step.id());
+                CapabilityResult documentResult = invokeDocumentStepSafely(context, input, workflowState, step);
+                String status = documentResult.success() ? "SUCCESS" : "FAILED";
+                stepNode.put("status", status);
+                stepNode.set("documentResult", objectMapper.valueToTree(documentResult));
+                if (documentResult.output() != null) {
+                    String summaryPreview = documentResult.output().path("summary").path("content").asText("");
+                    stepNode.put("renderedOutput", summaryPreview);
+                }
+                executionSupport.rememberStepOutput(
+                        workflowState,
+                        step,
+                        documentResult.output() == null ? objectMapper.nullNode() : documentResult.output()
+                );
+                executionSupport.rememberStepMeta(
+                        workflowState,
+                        step,
+                        executionSupport.buildStepMeta(step, documentResult, status)
+                );
+                if (documentResult.success()) {
+                    updateBranchAndGroupState(workflowState, stepNode);
+                    renderedSummaries.add(step.title() + "：已读取能力文档 " + stepNode.path("documentDocId").asText(""));
+                    continue;
+                }
+
+                workflowSuccess = false;
+                failedStepIds.add(step.id());
+                if (step.continueOnFailure()) {
+                    stepNode.put("continuedAfterFailure", true);
+                    continuedFailureStepIds.add(step.id());
+                    updateBranchAndGroupState(workflowState, stepNode);
+                    renderedSummaries.add(step.title() + "：能力文档读取失败，但流程继续");
+                    continue;
+                }
+
+                stepNode.put("haltedWorkflow", true);
+                result.put("haltedAtStepId", step.id());
+                result.put("haltedReason", documentResult.message() == null ? "" : documentResult.message());
+                updateBranchAndGroupState(workflowState, stepNode);
+                renderedSummaries.add(step.title() + "：能力文档读取失败，流程中断");
+                break;
             }
 
             if (step.capabilityId() != null) {
@@ -240,6 +292,21 @@ public class ExecutableWorkflowSkill implements Skill {
                     context,
                     capabilityInput
             );
+        } catch (RuntimeException exception) {
+            return new CapabilityResult(false, exception.getMessage(), objectMapper.nullNode());
+        }
+    }
+
+    /**
+     * 安全执行文档读取步骤。
+     * 文档读取失败时统一转成失败结果，便于 workflow 继续沿用现有的失败继续 / 中断机制。
+     */
+    private CapabilityResult invokeDocumentStepSafely(CapabilityContext context,
+                                                      JsonNode input,
+                                                      ObjectNode workflowState,
+                                                      SkillWorkflowStep step) {
+        try {
+            return executionSupport.readCapabilityDocumentStep(step, context, input, workflowState);
         } catch (RuntimeException exception) {
             return new CapabilityResult(false, exception.getMessage(), objectMapper.nullNode());
         }

@@ -142,6 +142,11 @@ class LocalSkillProviderTest {
         };
         StaticListableBeanFactory beanFactory = new StaticListableBeanFactory();
         beanFactory.addBean("capabilityRegistry", registry);
-        return new WorkflowSkillExecutionSupport(beanFactory.getBeanProvider(CapabilityRegistry.class), objectMapper, messageService());
+        return new WorkflowSkillExecutionSupport(
+                beanFactory.getBeanProvider(CapabilityRegistry.class),
+                beanFactory.getBeanProvider(com.example.agentruntime.document.CapabilityDocumentService.class),
+                objectMapper,
+                messageService()
+        );
     }
 }
